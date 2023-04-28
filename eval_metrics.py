@@ -3,11 +3,13 @@
 from pathlib import Path
 import json
 import csv
+import numpy as np
 from typing import Dict, List, Union, Tuple, Any
 from hparams import hparams as hp
 from coco_caption.pycocotools.coco import COCO
 from coco_caption.pycocoevalcap.eval import COCOEvalCap
-
+import time
+import random
 __author__ = 'Samuel Lipping -- Tampere University'
 __docformat__ = 'reStructuredText'
 __all__ = ['evaluate_metrics']
@@ -151,13 +153,18 @@ def evaluate_metrics_from_lists(predictions: List[str],
     pred, ref = reformat_to_coco(predictions, ground_truths, ids)
 
     # Write temporary files for the metric evaluation
-    tmp_dir = Path('tmp_'+hp.tmp_name)
-
+    # tmp_dir = Path('tmp_'+hp.tmp_name)
+    # tmp_name_random = np.random.random(1)[0]
+    # tmp_dir = Path('tmp_'+str(tmp_name_random))
+    tmp_dir = Path('tmp')
     if not tmp_dir.is_dir():
         tmp_dir.mkdir()
 
-    ref_file = tmp_dir.joinpath('ref.json')
-    pred_file = tmp_dir.joinpath('pred.json')
+    times = time.asctime(time.localtime(time.time()) )
+    r_d = str(random.random())
+    times = times + r_d
+    ref_file = tmp_dir.joinpath('ref_{}.json'.format(times))
+    pred_file = tmp_dir.joinpath('pred_{}.json'.format(times))
 
     write_json(ref, ref_file)
     write_json(pred, pred_file)

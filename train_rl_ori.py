@@ -21,8 +21,6 @@ from torch.nn import CrossEntropyLoss,BCELoss,BCEWithLogitsLoss
 from scripts.scst import scst_loss,RewardCriterion,get_self_critical_reward
 import pdb
 from coco_caption.pycocoevalcap.cider.cider import Cider
-from sklearn import metrics
-
 scorer = Cider()
 hp = hparams()
 parser = argparse.ArgumentParser(description='hparams for model')
@@ -30,19 +28,14 @@ parser = argparse.ArgumentParser(description='hparams for model')
 device = torch.device(hp.device)
 np.random.seed(hp.seed)
 torch.manual_seed(hp.seed)
-def clip_bce(output_dict, target_dict):
-    return F.binary_cross_entropy(
-        output_dict, target_dict)
 def train(epoch, max_epoch, mixup=False, augmentation=None):
     model.train()
     total_loss_text = 0.
     start_time = time.time()
     batch = 0
     total_cider = 0
-    loss_tags = 0
-    return_loss = []
     with torch.autograd.set_detect_anomaly(True):
-        for src, tgt, tgt_len, ref,filename, tags in training_data:
+        for src, tgt, tgt_len, ref,filename in training_data:
             tgt_y = tgt[:, 1:]
             if mixup:
                 mixup_lambda = augmentation.get_lambda(src.shape[0])
@@ -55,28 +48,25 @@ def train(epoch, max_epoch, mixup=False, augmentation=None):
             tgt_in = tgt[:, :-1]
             tgt_pad_mask = tgt_pad_mask[:, :-1]
             tgt_y = tgt_y.to(device)
-            # tags = tags.to(device).float()
+            
             optimizer.zero_grad()
 
             model.eval()
             with torch.no_grad():
-                (greedy_res,_),classifies  = model._sample(src, tgt, sample_method='greedy')
+                greedy_res,_ = model._sample(src, tgt, sample_method='greedy')
                 # print(greedy_res)
             model.train()
-            (gen_result, sample_logprobs),_ = model._sample(src, tgt, sample_method='sample')
+            gen_result, sample_logprobs = model._sample(src, tgt, sample_method='sample')
             reward, scores_mean = get_self_critical_reward(greedy_res, ref, gen_result, word_list,scorer)
             total_cider += scores_mean
             loss_text = criterion(sample_logprobs, gen_result, reward.to(device))
-            
-            # loss_tag = clip_bce(classifies, tags)
 
             loss = loss_text
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), hp.clip_grad)
             optimizer.step()
             total_loss_text += loss_text.item()
-            return_loss.append(loss_text.item())
-            # loss_tags += loss_tag.item()
+
             writer.add_scalar('Loss/train-text', loss_text.item(), (epoch - 1) * len(training_data) + batch)
 
             batch += 1
@@ -84,41 +74,29 @@ def train(epoch, max_epoch, mixup=False, augmentation=None):
             if batch % hp.log_interval == 0 and batch > 0:
                 mean_text_loss = total_loss_text / hp.log_interval
                 mean_cider = total_cider / hp.log_interval
-                mean_loss_tags = loss_tags / hp.log_interval
                 elapsed = time.time() - start_time
                 current_lr = [param_group['lr'] for param_group in optimizer.param_groups][0]
                 logging.info('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2e} | ms/batch {:5.2f} | '
-                            'loss-text {:5.4f} | mean cider {:5.5f} | loss-tag {:5.4f}'.format(
+                            'loss-text {:5.4f} | mean cider {:5.5f}'.format(
                     epoch, batch, len(training_data), current_lr,
-                    elapsed * 1000 / hp.log_interval, mean_text_loss, mean_cider, mean_loss_tags))
+                    elapsed * 1000 / hp.log_interval, mean_text_loss, mean_cider))
                 # torch.save(model.state_dict(), '{log_dir}/{epoch}_{iterations}.pt'.format(log_dir=log_dir, epoch=epoch,iterations=batch))
                 total_loss_text = 0
                 total_cider = 0
-                loss_tags = 0.
                 start_time = time.time()
-    return np.mean(return_loss)
 def eval_all(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_path=None, eval_model='Transformer'):
     model.eval()
     
     with torch.no_grad():
         output_sentence_all = []
         ref_all = []
-        pred_output = []
-        all_tag = []
-        loss_eval = []
-        for src, tgt, _, ref, filename, tags in evaluation_data:
+        for src, tgt, _, ref, filename in evaluation_data:
             src = src.to(device)
-            tags = tags.to(device).float()
             if eval_model == 'Transformer':
                 output = greedy_decode(model, src, max_len=max_len)
                 
             else:
-                output, classifies = model.greedy_decode(src)
-            loss_tag = clip_bce(classifies, tags)
-            pred_output.extend(classifies.cpu().numpy())
-            all_tag.extend(tags.cpu().numpy())
-            loss_eval.append(loss_tag.item())
-
+                output = model.greedy_decode(src)
 
             output_sentence_ind_batch = []
             for i in range(output.size()[0]):
@@ -130,21 +108,12 @@ def eval_all(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_path=None,
                 output_sentence_ind_batch.append(output_sentence_ind)
             output_sentence_all.extend(output_sentence_ind_batch)
             ref_all.extend(ref)
-        pred_output = np.array(pred_output)
-        all_tag = np.array(all_tag)
-        mean_loss = np.mean(loss_eval)
-        average_precision = metrics.average_precision_score(
-                all_tag, pred_output, average=None)
+
         score, output_str, ref_str = calculate_spider(output_sentence_all, ref_all, word_dict_pickle_path)
 
-        # loss_mean = score
-        # writer.add_scalar(f'Loss/eval_greddy', loss_mean, epoch)
-        # msg = f'eval_greddy SPIDEr: {loss_mean:2.4f}'
-        # logging.info(msg)
         loss_mean = score
         writer.add_scalar(f'Loss/eval_greddy', loss_mean, epoch)
-        # pdb.set_trace()
-        msg = f'eval_greddy SPIDEr: {loss_mean:2.4f} | loss_tag: {mean_loss:2.5f} | mAP: {np.mean(average_precision):2.5f}'
+        msg = f'eval_greddy SPIDEr: {loss_mean:2.4f}'
         logging.info(msg)
    
 def eval_with_beam(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_path=None, beam_size=3, eval_model='Transformer'):
@@ -152,7 +121,7 @@ def eval_with_beam(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_path
     with torch.no_grad():
         output_sentence_all = []
         ref_all = []
-        for src, tgt, _, ref,filename, tags in evaluation_data:
+        for src, tgt, _, ref,filename in evaluation_data:
             src = src.to(device)
 
             if eval_model == 'Transformer':
@@ -240,7 +209,7 @@ if __name__ == '__main__':
         hp.output_dim_h_decoder,hp.ntoken,hp.dropout_p_decoder,hp.max_out_t_steps,device,'tag',pretrain_emb,hp.tag_emb,
         hp.multiScale,hp.preword_emb,hp.two_stage_cnn,hp.usingLM).to(device)
     print("pretrain model path is",hp.pretrain_model_path)
-    model.load_state_dict(torch.load(hp.pretrain_model_path, map_location="cpu")['model'])
+    model.load_state_dict(torch.load(hp.pretrain_model_path, map_location="cpu"))
 
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=hp.lr, weight_decay=1e-6)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, hp.scheduler_decay)
@@ -264,7 +233,7 @@ if __name__ == '__main__':
         epoch = checkpoint['epoch']
         print(epoch, optimizer, scheduler)
         epoch = epoch +1
-        # pdb.set_trace()
+        pdb.set_trace()
     else:
         print("train from scratch")
         epoch = 1
@@ -366,20 +335,20 @@ if __name__ == '__main__':
         #                 beam_size=4, eval_model=eval_model)
         while epoch < hp.training_epochs + 1:
             epoch_start_time = time.time()
-            tr_loss = train(epoch, hp.training_epochs, hp.mixup, mixup_augmentation)
-            logging.info('| epoch {:3d} | loss-mean-text {:5.4f}'.format(
-                    epoch, tr_loss))
+            train(epoch, hp.training_epochs, hp.mixup, mixup_augmentation)
+            # torch.save(model.state_dict(), '{log_dir}/{num_epoch}.pt'.format(log_dir=log_dir, num_epoch=epoch))
+            
             scheduler.step(epoch)
-            # if epoch % 5 == 0:
-            #     eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=2, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=3, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=4, eval_model=eval_model)
-            # else:
-            #     eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
+            if epoch % 5 == 0:
+                eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
+                eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+                            beam_size=2, eval_model=eval_model)
+                eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+                            beam_size=3, eval_model=eval_model)
+                eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+                            beam_size=4, eval_model=eval_model)
+            else:
+                eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
             torch.save({
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),

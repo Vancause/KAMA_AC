@@ -253,11 +253,50 @@ print("action")
 #           f'--batch_size {bs} --device {cuda} --decoder {decoder}'
 #            )
 
-lr = 1e-7  # 5e-4
-training_epochs = 25
+# lr = 5e-4   
+# encoder_lr = 5e-5
+# training_epochs = 30
+# # name = 'test_one'
+# name = '256_lstm_tagloss_tag'
+# cuda = 'cuda:7'
+# bs = 32
+# decoder = 'AttDecoder'
+# # load_pretrain_emb
+# # resume ='models_trans/lstm_final/15.pt' 
+# os.system(f' python train.py --lr {lr}'
+#           f' --training_epochs {training_epochs} '
+#           f'--name {name}  --spec_augmentation --label_smoothing '
+#           f'--batch_size {bs} --device {cuda} --decoder {decoder} '
+#           f'--tag_emb --use_tags_loss --encoder_lr {encoder_lr} '
+#            )
+
+
+
+# lr = 5e-4   
+# encoder_lr = 5e-5
+# training_epochs = 30
+# # name = 'test_one'
+# name = '256_lstm_tagloss_new'
+# cuda = 'cuda:7'
+# bs = 32
+# decoder = 'AttDecoder'
+# # load_pretrain_emb
+# # resume ='models_trans/lstm_final/15.pt' 
+# os.system(f' python train.py --lr {lr}'
+#           f' --training_epochs {training_epochs} '
+#           f'--name {name}  --spec_augmentation --label_smoothing '
+#           f'--batch_size {bs} --device {cuda} --decoder {decoder} '
+#           f'--use_tags_loss --encoder_lr {encoder_lr} '
+#            )
+
+
+
+lr = 5e-4   
+encoder_lr = 5e-5
+training_epochs = 30
 # name = 'test_one'
-name = 'LSTM_tag_prev_tagloss_endt2end_1e_7'
-cuda = 'cuda:4'
+name = '512_lstm_tagloss_prev_tag_new1s'
+cuda = 'cuda:5'
 bs = 32
 decoder = 'AttDecoder'
 # load_pretrain_emb
@@ -266,8 +305,119 @@ os.system(f' python train.py --lr {lr}'
           f' --training_epochs {training_epochs} '
           f'--name {name}  --spec_augmentation --label_smoothing '
           f'--batch_size {bs} --device {cuda} --decoder {decoder} '
-          f'--tag_emb --preword_emb --use_tags_loss '
+          f'--tag_emb --preword_emb --use_tags_loss --encoder_lr {encoder_lr} '
            )
+
+
+# lr = 5e-4   
+# encoder_lr = 5e-5
+# training_epochs = 30
+# # name = 'test_one'
+# name = 'LSTM_final_abalation/test'
+# cuda = 'cuda:4'
+# bs = 32
+# decoder = 'AttDecoder'
+# topk_keywords = 3
+# dataset = 'AudioCaps' # AudioCaps Clotho
+# # load_pretrain_emb
+# # resume ='models_trans/lstm_final/15.pt' 
+# os.system(f' python train.py --lr {lr}'
+#           f' --training_epochs {training_epochs} '
+#           f'--name {name}  --spec_augmentation --label_smoothing '
+#           f'--batch_size {bs} --device {cuda} --decoder {decoder} '
+#           f'--preword_emb --use_tags_loss --encoder_lr {encoder_lr} --topk_keywords {topk_keywords} --dataset {dataset}'
+#            )
+
+# lr = 5e-4   
+# encoder_lr = 5e-5
+# training_epochs = 30
+# # name = 'test_one'
+# name = 'LSTM_final_abalation/keywords4'
+# cuda = 'cuda:0'
+# bs = 32
+# decoder = 'AttDecoder'
+# topk_keywords = 4
+# # load_pretrain_emb
+# # resume ='models_trans/lstm_final/15.pt' 
+# os.system(f' python train.py --lr {lr}'
+#           f' --training_epochs {training_epochs} '
+#           f'--name {name}  --spec_augmentation --label_smoothing '
+#           f'--batch_size {bs} --device {cuda} --decoder {decoder} '
+#           f'--preword_emb --use_tags_loss --encoder_lr {encoder_lr} --topk_keywords {topk_keywords}'
+#            )
+
+# lr = 5e-4   
+# encoder_lr = 5e-5
+# training_epochs = 30
+# # name = 'test_one'
+# name = 'LSTM_final_abalation/keywords6'
+# cuda = 'cuda:0'
+# bs = 32
+# decoder = 'AttDecoder'
+# topk_keywords = 6
+# # load_pretrain_emb
+# # resume ='models_trans/lstm_final/15.pt' 
+# os.system(f' python train.py --lr {lr}'
+#           f' --training_epochs {training_epochs} '
+#           f'--name {name}  --spec_augmentation --label_smoothing '
+#           f'--batch_size {bs} --device {cuda} --decoder {decoder} '
+#           f'--preword_emb --use_tags_loss --encoder_lr {encoder_lr} --topk_keywords {topk_keywords}'
+#            )
+
+# lr = 5e-4   
+# encoder_lr = 5e-5
+# training_epochs = 30
+# # name = 'test_one'
+# name = 'LSTM_final_abalation/keywords7'
+# cuda = 'cuda:0'
+# bs = 32
+# decoder = 'AttDecoder'
+# topk_keywords = 7
+# # load_pretrain_emb
+# # resume ='models_trans/lstm_final/15.pt' 
+# os.system(f' python train.py --lr {lr}'
+#           f' --training_epochs {training_epochs} '
+#           f'--name {name}  --spec_augmentation --label_smoothing '
+#           f'--batch_size {bs} --device {cuda} --decoder {decoder} '
+#           f'--preword_emb --use_tags_loss --encoder_lr {encoder_lr} --topk_keywords {topk_keywords}'
+#            )
+
+
+
+# lr = 5e-4   
+# encoder_lr = 5e-5
+# training_epochs = 30
+# # name = 'test_one'
+# name = '256_lstm_tagloss_tag'
+# cuda = 'cuda:5'
+# bs = 32
+# decoder = 'AttDecoder'
+# # load_pretrain_emb
+# # resume ='models_trans/lstm_final/15.pt' 
+# os.system(f' python train.py --lr {lr}'
+#           f' --training_epochs {training_epochs} '
+#           f'--name {name}  --spec_augmentation --label_smoothing '
+#           f'--batch_size {bs} --device {cuda} --decoder {decoder} '
+#           f'--tag_emb --use_tags_loss --encoder_lr {encoder_lr} '
+#            )
+
+
+
+# lr = 5e-4   
+# encoder_lr = 5e-5
+# training_epochs = 30
+# # name = 'test_one'
+# name = 'ResNet38_TF_tagloss_keywords500_cuda0_twolayer_0_1ratio' # ResNet38_TF_tagloss_keywords1038   new_test
+# cuda = 'cuda:0'
+# bs = 32
+# resume = 'models_trans/ResNet38_TF_tagloss_keywords500_ls_cuda5_twolayer/21.pt'
+# mode = 'train'
+# # load_pretrain_emb
+# os.system(f' python train.py --lr {lr}'
+#           f' --training_epochs {training_epochs} '
+#           f'--name {name}  --spec_augmentation --label_smoothing '
+#           f'--batch_size {bs} --device {cuda} --use_tags_loss --encoder_lr {encoder_lr} --mode {mode} ') # --load_pretrain_emb 
+
 
 
 # lr = 5e-4

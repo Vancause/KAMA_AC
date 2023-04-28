@@ -16,8 +16,8 @@ from util import do_mixup
 import pickle
 # from transformers import GPT2LMHeadModel, GPT2Config  # use gpt
 import heapq as hq
-from itertools import repeat
 import pdb
+import copy
 # def myGPT():
 #     device = torch.device(hp.device)
 #     configuration = GPT2Config()
@@ -129,41 +129,7 @@ class Tag2Encodeout(nn.Module):
         score = self.softmax(dot)
         att_res = torch.bmm(score,value).mean(dim=1)
         return att_res, score
-class SpatialDropout(nn.Module):
-    """
-    空间dropout,即在指定轴方向上进行dropout,常用于Embedding层和CNN层后
-    如对于(batch, timesteps, embedding)的输入,若沿着axis=1则可对embedding的若干channel进行整体dropout
-    若沿着axis=2则可对某些token进行整体dropout
-    """
-    def __init__(self, drop=0.5):
-        super(SpatialDropout, self).__init__()
-        self.drop = drop
-        
-    def forward(self, inputs, noise_shape=None):
-        """
-        @param: inputs, tensor
-        @param: noise_shape, tuple, 应当与inputs的shape一致,其中值为1的即沿着drop的轴
-        """
-        outputs = inputs.clone()
-        if noise_shape is None:
-            noise_shape = (inputs.shape[0], *repeat(1, inputs.dim()-2), inputs.shape[-1])   # 默认沿着中间所有的shape
-        
-        self.noise_shape = noise_shape
-        if not self.training or self.drop == 0:
-            return inputs
-        else:
-            noises = self._make_noises(inputs)
-            if self.drop == 1:
-                noises.fill_(0.0)
-            else:
-                noises.bernoulli_(1 - self.drop).div_(1 - self.drop)
-            noises = noises.expand_as(inputs)    
-            outputs.mul_(noises)
-            return outputs
-            
-    def _make_noises(self, inputs):
-        return inputs.new().resize_(self.noise_shape)
-    
+ 
 class AttDecoder(Module):
 
     def __init__(self,
@@ -180,7 +146,8 @@ class AttDecoder(Module):
                  multiScale=False,
                  preword_emb=False,
                  topk_keywords=5,
-                 dataset='Clotho') \
+                 dataset='Clotho',
+                 visualization=False) \
             -> None:
         """Decoder with attention.
         :param input_dim: Input features in the decoder.
@@ -216,9 +183,9 @@ class AttDecoder(Module):
                 self.tagging_to_embs = torch.tensor(pickle.load(open(hp.tagging_to_embs, 'rb')))
             else:
                 self.tagging_to_embs = torch.tensor(pickle.load(open(hp.tagging_to_embs_audiocaps, 'rb')))
-            self.preword_attention = Attention(emb_dim, output_dim, att_dim, output_dim)
+            self.taggingword_attention = Attention(emb_dim, output_dim, att_dim, output_dim)
             self.f_beta_taggingword = nn.Linear(input_dim, output_dim)
-        # pdb.set_trace()
+
         if preword_emb:
             self.preword_attention = Attention(emb_dim, output_dim, att_dim, output_dim)
             self.f_beta_preword = nn.Linear(input_dim, output_dim)  # linear layer to create a sigmoid-activated gate
@@ -239,14 +206,14 @@ class AttDecoder(Module):
         self.device = device
         self.emb_dim = emb_dim
         self.topk = topk_keywords
-
+        self.visualization = visualization
         # pdb.set_trace()
         if dataset == 'Clotho':
             self.sos = 0
             self.eos = 9
         else:
-            self.sos = 0
-            self.eos = 9
+            self.sos = 5044
+            self.eos = 5045
         if pretrain_emb is not None:
             print('Init pretrained word embedding!')
             self.word_emb = EmbeddingC(self.nb_classes, self.emb_dim, pretrain_emb)
@@ -255,6 +222,7 @@ class AttDecoder(Module):
             self.word_emb = nn.Embedding(self.nb_classes, emb_dim, pretrain_emb)
         print("word lens: {}".format(self.nb_classes))
         print('dataset {}'.format(dataset))
+
     def init_hidden_state(self, encoder_out, encoder_out1=None, encoder_out2=None):
         if self.multiScale:
             mean_encoder_out = encoder_out.mean(dim=1)
@@ -441,7 +409,13 @@ class AttDecoder(Module):
 
         if sample_method == "normal":
             word_prob = self.classifier(self.dropout(h))
-            return h, c, word_prob
+            if self.visualization and self.tag_emb:
+                return h, c, word_prob, alpha, gamma
+            elif self.visualization and not self.tag_emb:
+                gamma = None
+                return h, c, word_prob, alpha
+            else:
+                return h, c, word_prob
         elif sample_method == "greedy":
             word_prob = F.log_softmax(self.classifier(h), dim=-1)
             sampleLogprobs, it = torch.max(word_prob.data, 1)
@@ -501,13 +475,12 @@ class AttDecoder(Module):
 
 
     def translate_beam_search(self, x, x1, x2, beam_width=2, alpha=1.15, topk=1, number_required=None, classify=None, usingLM=False):
-        # 1.15
+        return_attend = self.visualization
         if number_required is None:
             number_required = beam_width
         BOS = self.sos
         EOS = self.eos
         max_len = self.maxlength
-        # pdb.set_trace()
         if usingLM:
             LMmodel = myGPT()
             LMmodel.eval()
@@ -534,6 +507,9 @@ class AttDecoder(Module):
         seq_preds = []
 
         output_dim = h.shape[1]
+        if return_attend:
+            output_attend_a = []
+            output_attend_t = []
         # decoding goes sample by sample
         for idx in range(batch_size):
             encoder_output = x[idx, :].unsqueeze(0)
@@ -552,7 +528,10 @@ class AttDecoder(Module):
                 previous_wordemb = None
             bos = torch.LongTensor([BOS]).to(device)
             # starting node -  hidden vector, previous node, word id, logp, length
-            node = BeamSearchNode(
+            if return_attend:
+                attend_list_a = []
+                attend_list_t = []
+                node = BeamSearchNode(
                 hiddenstate=(h[idx, :].unsqueeze(0), c[idx, :].unsqueeze(0)), 
                 previousNode=None, 
                 wordId=bos,
@@ -561,8 +540,22 @@ class AttDecoder(Module):
                 length=0, 
                 alpha=alpha,
                 previous_wordemb=previous_wordemb,
-                all_words=bos
+                all_words=bos,
+                attend_a=attend_list_a,
+                attend_t=attend_list_t
                 )
+            else:
+                node = BeamSearchNode(
+                    hiddenstate=(h[idx, :].unsqueeze(0), c[idx, :].unsqueeze(0)), 
+                    previousNode=None, 
+                    wordId=bos,
+                    logProb=0, 
+                    selflp=0, 
+                    length=0, 
+                    alpha=alpha,
+                    previous_wordemb=previous_wordemb,
+                    all_words=bos
+                    )
             nodes = PriorityQueue()
             tmp_nodes = PriorityQueue()
             # start the queue
@@ -589,8 +582,16 @@ class AttDecoder(Module):
                     now_h, now_c = n.h
                     it = n.wordid
                     word = self.word_emb(it)
-
-                    new_h, new_c, word_prob = self.step(encoder_output, encoder_output1, encoder_output2, now_h, now_c, it, previous_wordemb, tag_word)
+                    if return_attend:
+                        
+                        all_attends_a = copy.deepcopy(n.attend_a)
+                        all_attends_t = copy.deepcopy(n.attend_t)
+                        new_h, new_c, word_prob, attends_a, attends_t = self.step(encoder_output, encoder_output1, encoder_output2, now_h, now_c, it, previous_wordemb, tag_word)
+                        all_attends_a.append(attends_a.cpu())
+                        all_attends_t.append(attends_t.cpu())
+                        # pdb.set_trace()
+                    else:
+                        new_h, new_c, word_prob = self.step(encoder_output, encoder_output1, encoder_output2, now_h, now_c, it, previous_wordemb, tag_word)
                     word_prob = F.log_softmax(word_prob, dim=-1)
 
                     if usingLM:
@@ -610,7 +611,10 @@ class AttDecoder(Module):
                         decoded_t = torch.LongTensor([indexes[0][new_k]]).to(device)
                         all_words = torch.cat((n.all_words, decoded_t))
                         log_p = log_prob[0][new_k].item()
-                        node = BeamSearchNode((new_h, new_c), n, decoded_t, n.logp, log_p, n.leng + 1, alpha, p_emb,all_words)
+                        if return_attend:
+                            node = BeamSearchNode((new_h, new_c), n, decoded_t, n.logp, log_p, n.leng + 1, alpha, p_emb,all_words, all_attends_a, all_attends_t)
+                        else:
+                            node = BeamSearchNode((new_h, new_c), n, decoded_t, n.logp, log_p, n.leng + 1, alpha, p_emb,all_words)
                         tmp_nodes.put((-node.eval(), node))
 
                 if len(endnodes) >= number_required or tmp_nodes.empty(): 
@@ -634,11 +638,14 @@ class AttDecoder(Module):
             utterances = []
             count = 1
             
+
             for score, n in sorted(endnodes, key=operator.itemgetter(0)):
                 if count > topk: break
                 count += 1
                 utterance = []
-
+                if return_attend:
+                    output_attend_a.append(n.attend_a)
+                    output_attend_t.append(n.attend_t)
                 utterance.append(n.wordid[0].cpu().item())
                 # back trace
                 while n.prevNode != None:
@@ -653,15 +660,16 @@ class AttDecoder(Module):
                 utterances.append(utterance)
                 
             seq_preds.append(utterances)
-        # pdb.set_trace()
+            
         seq_preds = np.array(seq_preds)
         seq_preds = torch.from_numpy(seq_preds[:,0,:][:,:,None]).to(device)
         seq_preds = torch.zeros(batch_size, self.maxlength, self.nb_classes).to(device).scatter_(2,seq_preds,1)
-
+        if return_attend:
+            return seq_preds, output_attend_a, output_attend_t
         return seq_preds
 
 class BeamSearchNode(object):
-    def __init__(self, hiddenstate, previousNode, wordId, logProb, selflp, length, alpha, previous_wordemb, all_words):
+    def __init__(self, hiddenstate, previousNode, wordId, logProb, selflp, length, alpha, previous_wordemb, all_words, attend_a=None, attend_t=None):
         '''
         :param hiddenstate:
         :param previousNode:
@@ -681,7 +689,8 @@ class BeamSearchNode(object):
         self.alpha = alpha
         self.previous_wordemb = previous_wordemb
         self.all_words = all_words
-
+        self.attend_a = attend_a
+        self.attend_t = attend_t
     def __lt__(self, other):
         return (-self.eval()) < (-other.eval())
 
@@ -780,15 +789,20 @@ class AttModel(Module):
         return output, classify
 
     def beam_search(self,x,beam_width):
+        visualization = self.decoder.visualization
         if self.two_stage_cnn:
             classify, _, _, _ = self.encoder_fixed(x)
             _, h_encoder, h_encoder1, h_encoder2 = self.encoder(x)
         else:
             classify, h_encoder, h_encoder1, h_encoder2 = self.encoder(x)
-        output = self.decoder.translate_beam_search(h_encoder, h_encoder1, h_encoder2, beam_width=beam_width, classify=classify, usingLM=self.usingLM)
-        output = output.max(2)[1].cpu().numpy().tolist()
-
-        return output
+        if visualization:
+            output, out_attend_a, out_attend_t = self.decoder.translate_beam_search(h_encoder, h_encoder1, h_encoder2, beam_width=beam_width, classify=classify, usingLM=self.usingLM)
+            output = output.max(2)[1].cpu().numpy().tolist()
+            return output, out_attend_a, out_attend_t, classify
+        else:
+            output = self.decoder.translate_beam_search(h_encoder, h_encoder1, h_encoder2, beam_width=beam_width, classify=classify, usingLM=self.usingLM)
+            output = output.max(2)[1].cpu().numpy().tolist()
+            return output
 
     def freeze_cnn(self):
         for p in self.encoder.parameters():
@@ -837,8 +851,6 @@ class TransformerModel(nn.Module):
         self.use_threshold = use_threshold
         self.threshold  = threshold
         self.use_newtrans = use_newtrans
-        self.sos = 0
-        self.eos = 9
         self.warm_up = True
         self.topk_keywords = topk_keywords
         # self.proj_tag_linear_feat = nn.Linear(2048, nhid)
@@ -859,7 +871,6 @@ class TransformerModel(nn.Module):
         self.pos_encoder = PositionalEncoding(nhid, dropout)
         self.generator = nn.Softmax(dim=-1)
         
-        # self.spatial_dropout = SpatialDropout(0.2)
         # self.proj_tags = nn.Linear(nhid, nhid)
         self.init_weights()
 
@@ -900,7 +911,7 @@ class TransformerModel(nn.Module):
 
     def get_text_emb(self, a_feat, text):
         device = a_feat.device 
-        eos_token = self.eos
+        eos_token = 9
         # pdb.set_trace()       
         # if self.use_newtrans and epoch <=2:
         if  self.use_threshold  and not self.warm_up:
@@ -981,7 +992,6 @@ class TransformerModel(nn.Module):
             target_mask = self.generate_square_subsequent_mask(len(tgt)).to(device)
 
         tgt = self.dropout(self.word_emb(tgt)) * math.sqrt(self.nhid)
-        # tgt = self.spatial_dropout(self.word_emb(tgt)) * math.sqrt(self.nhid)
         tgt = self.pos_encoder(tgt)
         # mem = self.pos_encoder(mem)
         # pdb.set_trace()
@@ -991,14 +1001,14 @@ class TransformerModel(nn.Module):
                 output = self.transformer_decoder(tgt, mem_a, memory_mask=input_mask, tgt_mask=target_mask,
                                                 tgt_key_padding_mask=target_padding_mask)
             else:
-                output = self.transformer_decoder(tgt, mem_a, mem_t, memory_mask=input_mask, tgt_mask=target_mask,
-                                              tgt_key_padding_mask=target_padding_mask, text_key_padding_mask=text_masks)
+                output, attn_weights, attn_weights_words = self.transformer_decoder(tgt, mem_a, mem_t, memory_mask=input_mask, tgt_mask=target_mask,
+                                              tgt_key_padding_mask=target_padding_mask, text_key_padding_mask=text_masks, return_weights=True)
         else:
             
             output = self.transformer_decoder(tgt, mem_a, memory_mask=input_mask, tgt_mask=target_mask,
                                             tgt_key_padding_mask=target_padding_mask)
         output = self.dec_fc(output)
-        return output
+        return output, attn_weights, attn_weights_words
 
     def forward(self, src, tgt, epoch=None, max_epoch=None, input_mask=None, target_mask=None, target_padding_mask=None):
         # src:(batch_size,T_in,feature_dim)

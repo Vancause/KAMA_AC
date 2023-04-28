@@ -32,7 +32,7 @@ def eval_all(evaluation_data, ensemble_model, max_len=30, eos_ind=9, word_dict_p
     with torch.no_grad():
         output_sentence_all = []
         ref_all = []
-        for src, tgt, _, ref, filename in evaluation_data:
+        for src, tgt, _, ref, filename,tags in evaluation_data:
             src = src.to(device)
             output = ensemble_model.greedy_decode(src)
 
@@ -59,7 +59,7 @@ def eval_with_beam(evaluation_data, ensemble_model, max_len=30, eos_ind=9, word_
     with torch.no_grad():
         output_sentence_all = []
         ref_all = []
-        for src, tgt, _, ref, filename in evaluation_data:
+        for src, tgt, _, ref, filename,tags in evaluation_data:
             src = src.to(device)
 
             output = ensemble_model.beam_search(src, beam_width=beam_size)
@@ -214,7 +214,7 @@ if __name__ == '__main__':
                                         input_field_name='features',
                                         output_field_name='words_ind',
                                         load_into_memory=False,
-                                        batch_size=16,
+                                        batch_size=32,
                                         nb_t_steps_pad='max',
                                         shuffle=False,
                                         drop_last=False,
@@ -236,33 +236,41 @@ if __name__ == '__main__':
     if hp.mode == 'eval':
         model_list=[]    
         # ensemble models by epochs
-        while epoch < hp.training_epochs + 1:
+        # while epoch < hp.training_epochs + 1:
+        #     model = AttModel(hp.ninp, hp.nhid, hp.output_dim_encoder, hp.emb_size, hp.dropout_p_encoder,
+        #                      hp.output_dim_h_decoder, hp.ntoken, hp.dropout_p_decoder, hp.max_out_t_steps, device,
+        #                      'tag', None, hp.tag_emb, hp.multiScale, hp.preword_emb, hp.two_stage_cnn, hp.usingLM).to(device)
+        #     model.load_state_dict(torch.load("./models/finetune_seed1111/" + str(epoch) + ".pt",map_location='cpu'))
+        #     model.eval()
+        #     model_list.append(model)
+        #     epoch += 1
+
+        # while epoch < hp.training_epochs + 1:
+        model_list=[]
+        model_name = ['models/seed1234_rl_nopre_notag_truth/50.pt','models/seed1234_rl_nopre_notag_truth/60.pt','models/seed1234_rl_nopre_notag_truth/70.pt','models/seed1234_rl_nopre_notag_truth/85.pt']
+        for name in model_name:
             model = AttModel(hp.ninp, hp.nhid, hp.output_dim_encoder, hp.emb_size, hp.dropout_p_encoder,
-                             hp.output_dim_h_decoder, hp.ntoken, hp.dropout_p_decoder, hp.max_out_t_steps, device,
-                             'tag', None, hp.tag_emb, hp.multiScale, hp.preword_emb, hp.two_stage_cnn, hp.usingLM).to(device)
-            model.load_state_dict(torch.load("./models/finetune_seed1111/" + str(epoch) + ".pt",map_location='cpu'))
+                            hp.output_dim_h_decoder, hp.ntoken, hp.dropout_p_decoder, hp.max_out_t_steps, device,
+                            'tag', None, hp.tag_emb, hp.multiScale, hp.preword_emb, hp.two_stage_cnn, hp.usingLM).to(device)
+            model.load_state_dict(torch.load(name,map_location='cpu')['model'])
             model.eval()
             model_list.append(model)
-            epoch += 1
-       
         ensemble_model = EnsembleModel(model_list)
         eval_with_beam(evaluation_beam, ensemble_model, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
                        beam_size=4)
     elif hp.mode == 'test':
         # Generate caption(in test_out.csv)
         model_list=[]
-        model_name = ["./models/finetune_seed1111_trainall/8.pt","./models/finetune_seed6666_trainall/8.pt","./models/finetune_seed615_trainall/8.pt",
-        "./models/finetune_seed1111_trainall/9.pt","./models/finetune_seed6666_trainall/9.pt","./models/finetune_seed615_trainall/9.pt",
-        "./models/finetune_seed1111_trainall/10.pt","./models/finetune_seed6666_trainall/10.pt","./models/finetune_seed615_trainall/10.pt"]
+        model_name = ['models/seed1234_rl_nopre_notag_truth/50.pt','models/seed1234_rl_nopre_notag_truth/60.pt','models/seed1234_rl_nopre_notag_truth/70.pt','models/seed1234_rl_nopre_notag_truth/85.pt']
         for name in model_name:
             model = AttModel(hp.ninp, hp.nhid, hp.output_dim_encoder, hp.emb_size, hp.dropout_p_encoder,
                             hp.output_dim_h_decoder, hp.ntoken, hp.dropout_p_decoder, hp.max_out_t_steps, device,
                             'tag', None, hp.tag_emb, hp.multiScale, hp.preword_emb, hp.two_stage_cnn, hp.usingLM).to(device)
-            model.load_state_dict(torch.load(name,map_location='cpu'))
+            model.load_state_dict(torch.load(name,map_location='cpu')['model'])
             model.eval()
             model_list.append(model)
         ensemble_model = EnsembleModel(model_list)
-        test_with_beam(test_data, ensemble_model, beam_size=4, eval_model=eval_model,name="seed11116666615_ensemble_epoch8_9_10")
+        test_with_beam(test_data, ensemble_model, beam_size=4, eval_model=eval_model,name="ensemble_analysis")
     else:
         raise ValueError("Mode must be eval or test!")
 

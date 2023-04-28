@@ -4,7 +4,8 @@ import torch.nn.functional as F
 import time
 import sys
 from data_handling import get_clotho_loader, get_test_data_loader
-from model import AttModel, TransformerModel # , RNNModel, RNNModelSmall
+# from model import AttModel, TransformerModel # , RNNModel, RNNModelSmall
+from model_visualization import AttModel, TransformerModel
 import itertools
 import numpy as np
 import os
@@ -21,8 +22,11 @@ import argparse
 from sklearn import metrics
 import pdb
 from scripts.cider import CiderScorer
+from scripts.scst import scst_loss,RewardCriterion,get_self_critical_reward,get_self_cider
+from coco_caption.pycocoevalcap.cider.cider import Cider
 import pickle
 from warmup_scheduler import GradualWarmupScheduler
+scorer = Cider()
 
 hp = hparams()
 parser = argparse.ArgumentParser(description='hparams for model')
@@ -31,8 +35,6 @@ parser = argparse.ArgumentParser(description='hparams for model')
 np.random.seed(hp.seed)
 torch.manual_seed(hp.seed)
 random.seed(hp.seed)
-# torch.backends.cudnn.deterministic = True
-# torch.cuda.manual_seed_all(hp.seed)
 
 def clip_bce(output_dict, target_dict):
     return F.binary_cross_entropy_with_logits(
@@ -80,7 +82,6 @@ def train(epoch, max_epoch, mixup=False, augmentation=None):
     ratio_a = 0.5
     with torch.autograd.set_detect_anomaly(True):
         for src, tgt, tgt_len, ref, filename, tags, _ in training_data:
-            # pdb.set_trace()
             tgt_y = tgt[:, 1:]
             if mixup:
                 mixup_lambda = augmentation.get_lambda(src.shape[0])
@@ -113,7 +114,6 @@ def train(epoch, max_epoch, mixup=False, augmentation=None):
                 loss_text = clip_bce(output_, tgt_y_)
             else:
                 loss_text = criterion(output_.contiguous().view(-1, hp.ntoken), tgt_y_.contiguous().view(-1))
-            # pdb.set_trace()
             if hp.use_tags_loss:
                 loss_tag = clip_bce(classifies, tags)
             
@@ -159,7 +159,7 @@ def eval_all(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_path=None,
         pred_output = []
         all_tag = []
         loss_eval = []
-    
+       
         for src, tgt, _, ref, filename,tags, _ in evaluation_data:
             src = src.to(device)
             tags = tags.to(device).float()
@@ -211,9 +211,10 @@ def eval_with_beam(evaluation_data, max_len=30, sos_ind=0, eos_ind=9, word_dict_
     word_dict[len(word_dict)] = '<pad>'
     special_token = ['<sos>', '<eos>', '<pad>']
     cider_scorer = CiderScorer(df="scripts/output_pkl_inds.p")
+    
     # filenames = ['07 ambient bell.wav','080809_05_FontanaKoblerov.wav','20080226.serins.rbd.02.wav','20100422.waterfall.birds.wav']
     with torch.no_grad():
-        # pdb.set_trace()
+        
         output_sentence_all = []
         ref_all = []
         for i, (src, tgt, _, ref,filename,tags, _) in enumerate(evaluation_data):
@@ -230,8 +231,7 @@ def eval_with_beam(evaluation_data, max_len=30, sos_ind=0, eos_ind=9, word_dict_
             for single_sample in output:
                 output_sentence_ind = []
                 for sym in single_sample:
-                    
-                    if sym == eos_ind: break
+                    if sym == eos_ind: break    
                     if eval_model == 'Transformer':
                         output_sentence_ind.append(sym.item())
                     else:
@@ -239,23 +239,11 @@ def eval_with_beam(evaluation_data, max_len=30, sos_ind=0, eos_ind=9, word_dict_
                 output_sentence_ind_batch.append(output_sentence_ind)
             output_sentence_all.extend(output_sentence_ind_batch)
             ref_all.extend(ref)
-            # if filename[0] in filenames:
-            #     output_str = [ind_to_str(o, special_token, word_dict) for o in output_sentence_all]
-            #     ref_str = [[ind_to_str(r, special_token, word_dict) for r in ref] for ref in ref_all]
-            #     output_str = [' '.join(o) for o in output_str]
-            #     ref_str = [[' '.join(r) for r in ref] for ref in ref_str]
-            #     cider_scorer.cook_append(output_str[i], ref_str[i])
-            #     score_mean, _ = cider_scorer.compute_score()
-            #     print("prediction: {}".format(output_str[i]))
-            #     print("groundtruth: {}".format(ref_str[i]))
-            #     print("Cider score: {}".format(score_mean))
-            #     # pdb.set_trace()
         
         score, output_str, ref_str, all_score = calculate_spider(output_sentence_all, ref_all, word_dict_pickle_path)
-        
-        loss_mean = score
 
-        
+        loss_mean = score
+        # pdb.set_trace()
         c_score = all_score['CIDEr']
         writer.add_scalar(f'Loss/eval_beam', loss_mean, epoch)
         msg = f'eval_beam_{beam_size}  SPIDEr: {loss_mean:2.4f}  CIDEr: {c_score:2.4f} allscore {all_score} '
@@ -290,19 +278,27 @@ def test_with_beam(test_data, max_len=30, eos_ind=9, beam_size=3,eval_model='Tra
                 for caption, fn in zip(out_str, filename):
                     writer.writerow(['{}.wav'.format(fn), caption])
 
-def eval_with_beam_csv(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_path=None, beam_size=3, eval_model='Transformer'):
+def eval_with_beam_csv(evaluation_data, max_len=30, sos_ind=0, eos_ind=9, word_dict_pickle_path=None, beam_size=3, eval_model='Transformer'):
     model.eval()
+    word_dict = get_word_dict(word_dict_pickle_path)
+    word_dict[len(word_dict)] = '<pad>'
+    with open('./audio_tag/word_list_500_train.p', 'rb') as f:
+        testtag = np.array(pickle.load(f))
 
     with torch.no_grad():
-        with open("test_out.csv", "w") as f:
+        with open("visual_output/attmodel_new_out.csv", "w") as f:
             writer = csv.writer(f)
-            writer.writerow(['filename','caption_groudtruth','caption_predicted'])
-            for src, tgt, _, ref, filename in evaluation_data:
-                print(src.shape)
+            writer.writerow(['filename','caption_groudtruth','caption_predicted','cider','tags'])
+            for src, tgt, _, ref,filename,tags, _ in evaluation_data:
+                # print(src.shape)
                 src = src.to(device)
+                # _, _, classifications, _ = model.encode(src)
+                classifications, _, _, _ = model.encoder(src)
+                classifications = classifications.topk(5)[1].cpu()
+                classifications = testtag[classifications].tolist()
                 tgt = tgt.numpy().tolist()
                 if eval_model == 'Transformer':
-                    output = beam_search(model, src, max_len, start_symbol_ind=0, beam_size=beam_size)
+                    output = beam_decode(src, model, sos_ind=sos_ind, eos_ind=eos_ind, beam_width=beam_size, kwp=hp.use_tags_t)
                 else:
                     output = model.beam_search(src, beam_width=beam_size)
                 output_sentence_ind_batch = []
@@ -315,13 +311,210 @@ def eval_with_beam_csv(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_
                         else:
                             output_sentence_ind.append(sym)
                     output_sentence_ind_batch.append(output_sentence_ind)
-                
+                # pdb.set_trace()
+                cider_score = get_self_cider(output_sentence_ind_batch, ref, word_dict, scorer)
+                cider_score = np.round(cider_score,3).tolist()
                 out_str = gen_str(output_sentence_ind_batch, hp.word_dict_pickle_path)
                 _ , ref_str = get_eval(tgt, ref, hp.word_dict_pickle_path)
                 
                 # print(ref_str[0])
-                for caption, groundtruth,fname in zip(out_str, ref_str,filename):
-                    writer.writerow([fname,groundtruth,caption])
+                for caption, groundtruth,fname, c_score, t_class in zip(out_str, ref_str,filename, cider_score, classifications):
+                    writer.writerow([fname,groundtruth,caption,t_class, c_score])
+
+def save_pic(one_dict):
+    import librosa 
+    import librosa.display
+    import numpy as np
+    import matplotlib.pyplot as plt
+    import pylab
+    import cv2
+    from PIL import Image
+    out_str = one_dict['out_str']
+    attend_a = one_dict['attend_a']
+    attend_t = one_dict['attend_t']
+    pylab.axis('off') # no axis
+    pylab.axes([0., 0., 1., 1.], frameon=False, xticks=[], yticks=[]) # Remove the white edge
+    path = "/data/yzj_data/workspace/DCASE2021_Task6_PKU/create_dataset/data/clotho_audio_files/evaluation/Flowing traffic in the outer ring of Milan 2.wav"
+
+    # sr=None声音保持原采样频率， mono=False声音保持原通道数
+    data, fs = librosa.load(path, sr=None, mono=False)
+    print(fs)
+    L = len(data)
+    print('Time:', L / fs)
+    # 0.025s
+    framelength = 1024/fs
+    # NFFT点数=0.025*fs
+    framesize = int(framelength * fs)
+    print("NFFT:", framesize)
+    #提取mel特征
+    mel_spect = librosa.feature.melspectrogram(data, sr=fs, n_fft=framesize,n_mels=64)
+    #转化为log形式
+    mel_spect = librosa.power_to_db(mel_spect, ref=np.max)
+    #画mel谱图
+    librosa.display.specshow(mel_spect, sr=fs, x_axis='time', y_axis='mel')
+    pylab.savefig('t_output/1.png', bbox_inches=None, pad_inches=0)
+    pylab.close()
+    for i, att in enumerate(attend_a[:-1]):
+        att = att.numpy()[:,np.newaxis,:]
+        mask = att.repeat(64,axis=1)
+        mask = mask.transpose(2,1,0)
+        # print(att.shape)
+        mask = cv2.resize(mask,(288,432))
+        # heatmap = mask/np.max(mask)
+        # heatmap = np.uint8(255 * heatmap)
+        mask = mask.transpose(1,0)
+        img = Image.open("t_output/1.png")
+        # plt.imshow(mask, alpha=0.4, cmap='gray')  #alpha设置透明度, cmap可以选择颜色
+
+        # img = img + mask
+        pylab.imshow(img)
+        pylab.imshow(mask, alpha=0.6,cmap='gray' )
+        pylab.savefig('t_output/1_out_{}.png'.format(out_str[i]), bbox_inches=None, pad_inches=0)
+        # pylab.show()
+        # break 
+
+def plot_visual(attention_weight, x_ind, y_ind, save_dir):
+    logging.getLogger('matplotlib').setLevel(logging.WARNING)
+    
+
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    plt.rcParams['font.size'] = 14
+    # plt.rcParams['xtick.visible'] = False
+    # plt.rcParams['ytick.visible'] = False
+    # plt.rcParams['axes.spines.top'] = False
+    # plt.rcParams['axes.spines.right'] = False
+    # attention_weight = torch.cat(attention_weight).transpose(0,1).numpy()
+    sns.set()
+    plt.figure(figsize=(10, 5))
+    sns.heatmap(attention_weight,  cmap='Blues', annot=False,cbar=False)
+    xticklabels =  x_ind
+    yticklabels =  y_ind
+    plt.xticks(np.arange(len(xticklabels))+0.5, xticklabels, fontsize=12, rotation=90)
+    plt.yticks(np.arange(len(yticklabels))+0.5, yticklabels, fontsize=12,rotation=0)
+    # plt.colorbar(cax=None)
+    plt.axis('off')
+
+    plt.tight_layout()
+    plt.savefig(save_dir,dpi=400)
+
+def eval_with_beam_visualization(evaluation_data, max_len=30, sos_ind=0, eos_ind=9, word_dict_pickle_path=None, beam_size=3, eval_model='Transformer'):
+    model.eval()
+    word_dict = get_word_dict(word_dict_pickle_path)
+    word_dict[len(word_dict)] = '<pad>'
+
+    tagwords = get_word_dict('audio_tag/word_list_500_train.p')
+    
+    # filenames = ['07 ambient bell.wav','080809_05_FontanaKoblerov.wav','20080226.serins.rbd.02.wav','20100422.waterfall.birds.wav']
+    with torch.no_grad():
+        # model.decoder.visualization=True
+        output_sentence_all = []
+        ref_all = []
+        for i, (src, tgt, _, ref,filename,tags, lens) in enumerate(evaluation_data):
+            # output_sentence_all = []
+            # ref_all = []
+            # pdb.set_trace()
+            # if filename[0] != 'night ambient crickets bugs white noise occasional cough.wav':
+            #     continue
+            # f_name = 'door-squeak-rattle.wav'
+            # f_name = 'Tenerife_bazaar_2.wav'
+            f_name = 'Wind Chimes On Town Square, Germany.wav'
+            # f_name = 'Flowing traffic in the outer ring of Milan 2.wav'
+            # f_name = 'Brushing_Teeth_Bathroom_Fx.wav'
+            # f_name = 'Dogs barking from barn in distance in the morning.wav'
+            # f_name = 'Tenerife_bazaar_2.wav'
+            if f_name not in filename:
+                continue
+            # pdb.set_trace()
+            src = src.to(device)
+
+            if eval_model == 'Transformer':
+                # output = beam_search(model, src, max_len, start_symbol_ind=0, beam_size=beam_size)
+                output, classify, attend_a, attend_t = beam_decode(src, model, sos_ind=sos_ind, eos_ind=eos_ind, beam_width=beam_size, kwp=hp.use_tags_t, visualization=True)
+            else:
+                output, attend_a, attend_t, classify = model.beam_search(src, beam_width=beam_size)
+            # pdb.set_trace()
+            output_sentence_ind_batch = []
+            for single_sample in output:
+                output_sentence_ind = []
+                for sym in single_sample:
+                    if sym == eos_ind: break    
+                    if eval_model == 'Transformer':
+                        output_sentence_ind.append(sym.item())
+                    else:
+                        output_sentence_ind.append(sym)
+                output_sentence_ind_batch.append(output_sentence_ind)
+            # output_sentence_all.extend(output_sentence_ind_batch)
+            # ref_all.extend(ref)
+            
+            
+            out_str = gen_str(output_sentence_ind_batch, hp.word_dict_pickle_path)
+            cider_score = get_self_cider(output_sentence_ind_batch, ref, word_dict, scorer)
+            cider_score = np.round(cider_score,3).tolist()
+            new_dict = {}
+            #
+            if  eval_model == 'Transformer':
+                # pdb.set_trace()
+                index = filename.index(f_name)
+                tags_index = classify[index].topk(5)[1].cpu().numpy()
+                tags_file = [tagwords[ind] for ind in tags_index]
+                cur_attend_a = attend_a[index]
+                cur_attend_t = attend_t[index]
+                for i in range(len(cur_attend_a)):
+                    att_a = cur_attend_a[i][0].transpose(0,1).numpy()
+                    att_t = cur_attend_t[i][0].transpose(0,1).numpy()
+                    x_ind_str = out_str[index].split()
+                    x_ind_str.append('<eos>')
+                    # pdb.set_trace()
+                    lens_ = lens[index]*512/44100 /10
+                    x_index = np.array(' ', dtype='U100').repeat(att_a.shape[0])
+                    lens_y = att_a.shape[0]/lens_
+                    for k in range(int(np.ceil(lens_))):
+
+                        x_index[int(lens_y * k)]=str(k*10)
+                    # pdb.set_trace()
+                    plot_visual(att_t, x_ind_str, tags_file, 't_output/{}_tag_trans_decoder_new{}.png'.format(f_name,i))
+                    plot_visual(att_a, x_ind_str, x_index, 't_output/{}_audio_trans_decoder_new{}.png'.format(f_name,i))
+            else:
+                index = filename.index(f_name)
+                tags_index = classify[index].topk(5)[1].cpu().numpy()
+                tags_file = [tagwords[ind] for ind in tags_index]
+                new_dict['fname'] = f_name
+                new_dict['out_str'] = out_str[index]
+                new_dict['attend_a']=attend_a[index]
+                new_dict['attend_t']=attend_t[index]
+                new_dict['tags']=tags_file
+                
+                x_ind_str = out_str[index].split()
+                attend_a = torch.cat(attend_a[index]).transpose(0,1).numpy()
+                attend_t = torch.cat(attend_t[index]).transpose(0,1).numpy()
+                # x_ind_str.insert(0,'<sos>')
+                x_ind_str.append('<eos>')
+                
+                lens = lens[index]*512/44100 /10
+                x_index = np.array(' ', dtype='U100').repeat(attend_a.shape[0])
+                lens_y = attend_a.shape[0]/lens
+                for i in range(int(np.ceil(lens))):
+
+                    x_index[int(lens_y * i)]=str(i*10)
+                # pdb.set_trace()
+                plot_visual(attend_t, x_ind_str, tags_file, 't_output/{}_tag_trans.png'.format(f_name))
+                plot_visual(attend_a, x_ind_str, x_index, 't_output/{}_audio_trans.png'.format(f_name))
+            # with open('t_output/one.pickle', 'wb') as f:
+            #     pickle.dump(new_dict, f)
+            # save_pic(new_dict)
+            # out_str = gen_str(output_sentence_ind_batch, hp.word_dict_pickle_path)
+            # _ , ref_str = get_eval(tgt, ref, hp.word_dict_pickle_path)
+            pdb.set_trace()
+        score, output_str, ref_str, all_score = calculate_spider(output_sentence_all, ref_all, word_dict_pickle_path)
+
+        loss_mean = score
+        # pdb.set_trace()
+        c_score = all_score['CIDEr']
+        writer.add_scalar(f'Loss/eval_beam', loss_mean, epoch)
+        msg = f'eval_beam_{beam_size}  SPIDEr: {loss_mean:2.4f}  CIDEr: {c_score:2.4f} allscore {all_score} '
+        logging.info(msg)
+
 if __name__ == '__main__':
     parser.add_argument('--device', type=str, default=hp.device)
     parser.add_argument('--nlayers', type=int, default=hp.nlayers)
@@ -349,8 +542,7 @@ if __name__ == '__main__':
     parser.add_argument('--finetune_ce', action='store_true')
     parser.add_argument('--use_tags_loss', action='store_true')
 
-    parser.add_argument('--optimizer_epoch', type=int, default=5)
-    parser.add_argument('--optimizer_delay', type=float, default=0.5)
+    
     # att model 
     parser.add_argument('--tag_emb', action='store_true')
     parser.add_argument('--preword_emb', action='store_true')
@@ -363,48 +555,33 @@ if __name__ == '__main__':
     parser.add_argument('--threshold_t', type=float, default=hp.threshold_t)
     parser.add_argument('--encoder_lr', type=float, default=hp.encoder_lr)
     parser.add_argument('--topk_keywords', type=int, default=hp.topk_keywords)
-    parser.add_argument('--nhead_t', type=int, default=hp.nhead_t)
-    parser.add_argument('--nhid_t', type=int, default=hp.nhid_t)
-    parser.add_argument('--nlayers_t', type=int, default=hp.nlayers_t)
-    parser.add_argument('--dim_feedforward', type=int, default=hp.dim_feedforward)
-
     args = parser.parse_args()
     for k, v in vars(args).items():
         setattr(hp, k, v)
     args = parser.parse_args()
     # pdb.set_trace()
     if hp.dataset == 'AudioCaps':
-        # hp.ntoken = 5046+1
-        hp.ntoken = 5290 # 5290  5289
+        hp.ntoken = 5046+1
     device = torch.device(hp.device)
     eval_model = hp.decoder
 
-    # hp.tagging_to_embs = 'none'
-    # pretrain_emb = align_word_embedding(hp.word_dict_pickle_path, hp.pretrain_emb_path, hp.ntoken,
-    #                                     hp.emb_size,load_type='bert') if hp.load_pretrain_emb else None
-    
-    # pdb.set_trace()
     if hp.load_pretrain_emb:
         pretrain_emb = pickle.load(open(hp.pretrain_emb_path,'rb'))
     else:
         pretrain_emb = None
-    if hp.dataset == 'AudioCaps':
-        pretrain_cnn = torch.load(hp.pretrain_cnn_path_audiocaps, map_location="cpu") if hp.load_pretrain_cnn else None
-    else:
-        pretrain_cnn = torch.load(hp.pretrain_cnn_path, map_location="cpu") if hp.load_pretrain_cnn else None
+    pretrain_cnn = torch.load(hp.pretrain_cnn_path, map_location="cpu") if hp.load_pretrain_cnn else None
     
     if hp.decoder == 'AttDecoder':
         if hp.load_pretrain_emb:
             print("load pretrain embedding")
-        # pdb.set_trace()
         model = AttModel(hp.ninp,hp.nhid,hp.output_dim_encoder,hp.emb_size,hp.dropout_p_encoder,
         hp.output_dim_h_decoder,hp.ntoken,hp.dropout_p_decoder,hp.max_out_t_steps,device,'tag',pretrain_emb,hp.tag_emb,
-        hp.multiScale,hp.preword_emb,hp.two_stage_cnn,hp.usingLM, topk_keywords=hp.topk_keywords,dataset=hp.dataset).to(device)
+        hp.multiScale,hp.preword_emb,hp.two_stage_cnn,hp.usingLM).to(device)
         
     elif hp.decoder == 'Transformer': # no used now
         model = TransformerModel(hp.ntoken, hp.ninp, hp.nhead_t, hp.nhid_t, hp.nlayers_t, hp.batch_size, dropout=0.2,
                              pretrain_cnn=pretrain_cnn, pretrain_emb=pretrain_emb, freeze_cnn=hp.freeze_cnn, dim_feedforward=hp.dim_feedforward, use_tags=hp.use_tags_t, 
-                             use_threshold=hp.use_threshold_t, threshold=hp.threshold_t,use_newtrans=hp.use_newtrans,topk_keywords=hp.topk_keywords,dataset=hp.dataset).to(device)
+                             use_threshold=hp.use_threshold_t, threshold=hp.threshold_t,use_newtrans=hp.use_newtrans).to(device)
     else :
         print('exit!!!')
         sys.exit(0)
@@ -432,16 +609,7 @@ if __name__ == '__main__':
     if hp.freeze_classifer and hp.two_stage_cnn:
         model.freeze_classifer()
         print("freeze_classifer has finished!")
-   
-    # param_dicts = [
-    #             {"params": [p for n, p in model.named_parameters() if
-    #                         "encoder" not in n and p.requires_grad]},
-    #             {
-    #                 "params": [p for n, p in model.named_parameters() if
-    #                            "encoder" in n and p.requires_grad],
-    #                 "lr": hp.encoder_lr,   # 3e-5
-    #             },   # (encoder fc)  decoder
-    #         ]
+
     param_dicts = [
                 {"params": [p for n, p in model.named_parameters() if
                             "encoder" not in n and p.requires_grad]},
@@ -459,19 +627,11 @@ if __name__ == '__main__':
             ]
     
 
-    # optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=hp.lr, weight_decay=1e-6)
     optimizer = torch.optim.Adam(params=param_dicts, lr=hp.lr, weight_decay=1e-6)
-    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, hp.scheduler_decay)
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, hp.optimizer_epoch, hp.optimizer_delay)
-    # scheduler_warmup = GradualWarmupScheduler(optimizer, multiplier=1, total_epoch=5, after_scheduler=scheduler)
-    # for param_group in optimizer.param_groups:
-    #     pdb.set_trace()
-    # optimizer = torch.optim.Adam(params=param_dicts, lr=hp.lr, weight_decay=1e-6)
-    # scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, hp.scheduler_decay)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 5, 0.5)
 
     if hp.label_smoothing:
         criterion = LabelSmoothingLoss(hp.ntoken, smoothing=0.1, word_freq=hp.word_freq_reciprocal_pickle_path)
-        # criterion = nn.CrossEntropyLoss(ignore_index=hp.ntoken - 1)
     else:
         criterion = nn.CrossEntropyLoss(ignore_index=hp.ntoken - 1)
     if hp.multi_gpu:
@@ -500,7 +660,7 @@ if __name__ == '__main__':
             optimizer.load_state_dict(checkpoint['optimizer'])
             scheduler.load_state_dict(checkpoint['scheduler'])
             epoch = checkpoint['epoch']
-            # model.warm_up = False
+            model.warm_up = False
             epoch += 1
     else:
         print("train from scratch")
@@ -517,8 +677,8 @@ if __name__ == '__main__':
     if hp.dataset == 'AudioCaps':
         data_dir = hp.data_dir_audiocaps
         word_dict_pickle_path = hp.word_dict_pickle_path_audiocaps
-        sos_ind = 0
-        eos_ind = 9
+        sos_ind = 5044
+        eos_ind = 5045
 
        
     else:
@@ -597,69 +757,17 @@ if __name__ == '__main__':
         mixup_augmentation = Mixup(mixup_alpha=1.0)
     else :
         mixup_augmentation = None
+    # pdb.set_trace()
     if hp.mode == 'train':
-        # pdb.set_trace()
-        # eval_with_beam(evaluation_beam, max_len=30, sos_ind=sos_ind, eos_ind=eos_ind, word_dict_pickle_path=word_dict_pickle_path,
-        #                     beam_size=3, eval_model=eval_model)
-        # eval_with_beam(evaluation_beam, max_len=30, sos_ind=sos_ind, eos_ind=eos_ind, word_dict_pickle_path=word_dict_pickle_path,
-        #             beam_size=4, eval_model=eval_model)
 
         while epoch < hp.training_epochs + 1:
-            
-           
-            # scheduler_warmup.step(epoch)
-
-            # if epoch == 5:
-            #     param_dicts = [
-            #     {"params": [p for n, p in model.named_parameters() if
-            #                 "encoder" not in n and p.requires_grad]},
-            #     {
-            #         "params": [p for n, p in model.named_parameters() if
-            #                    "encoder" in n and p.requires_grad],
-            #         "lr": 3e-5,  # 6e-5 3e-5
-            #     },
-            #     ]
-    
-            #     optimizer = torch.optim.Adam(params=param_dicts, lr=3e-4, weight_decay=1e-6)  # 6e-4 3e-4
-            #     # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 5, 0.5)
-            #     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, hp.scheduler_decay)
             epoch_start_time = time.time()
             
             # pdb.set_trace()
             tr_loss = train(epoch, hp.training_epochs, hp.mixup, mixup_augmentation)
             logging.info('| epoch {:3d} | loss-mean-text {:5.4f}'.format(
                     epoch, tr_loss))
-            # torch.save(model.state_dict(), '{log_dir}/{num_epoch}.pt'.format(log_dir=log_dir, num_epoch=epoch))
             scheduler.step(epoch)
-            
-            # if epoch % 5 == 0:
-            #     eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=2, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=3, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=4, eval_model=eval_model)
-            # elif epoch > 20:
-            #     eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=2, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=3, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=4, eval_model=eval_model)
-            # else:
-            #     pass
-            # if epoch % 5 == 0:
-            #     eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=2, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=3, eval_model=eval_model)
-            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=4, eval_model=eval_model)
-            # else:
-            #     eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
             torch.save({
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
@@ -684,42 +792,30 @@ if __name__ == '__main__':
             model.warm_up = False
 
     if hp.mode == 'eval':
-        epoch = 5
-        while epoch < hp.training_epochs + 1:
-            # if epoch % 5 !=0:
-            #     epoch += 1
-            #     continue
-                
-            # Evaluation model score
-            logging.info("The epoch is {}".format(epoch))
-            # model.load_state_dict(torch.load("./models_audiocaps/lstm_newdataset_refine2/{}.pt".format(18),map_location="cpu")['model'])
-            model.load_state_dict(torch.load("./models_audiocaps/transformer_newdataset_refine2/{}.pt".format(epoch),map_location="cpu")['model'])
-            
-            logging.info(" evaluation ")
-            # eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
-            # # eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-            # #         beam_size=2, eval_model=eval_model)
-            eval_with_beam(evaluation_beam, max_len=30, sos_ind=sos_ind, eos_ind=eos_ind, word_dict_pickle_path=word_dict_pickle_path,
-                            beam_size=2, eval_model=eval_model)
-            eval_with_beam(evaluation_beam, max_len=30, sos_ind=sos_ind, eos_ind=eos_ind, word_dict_pickle_path=word_dict_pickle_path,
-                            beam_size=3, eval_model=eval_model)
-            eval_with_beam(evaluation_beam, max_len=30, sos_ind=sos_ind, eos_ind=eos_ind, word_dict_pickle_path=word_dict_pickle_path,
-                            beam_size=4, eval_model=eval_model)
-            
-            # eval_with_beam(evaluation_beam, max_len=30, sos_ind=sos_ind, eos_ind=eos_ind, word_dict_pickle_path=word_dict_pickle_path,
-            #                 beam_size=2, eval_model=eval_model)
-            
-            print("epoch is {}".format(epoch))
-            # sys.exit()
-            epoch += 1
-            # break
+        epoch = 21
+       
+
+        # Evaluation model score
+        logging.info("The epoch is {}".format(epoch))
+        # model.load_state_dict(torch.load("./models_trans/baseline_nowarmup_trans_tag_top5_losstag/{}.pt".format(epoch),map_location='cpu')['model'])
+        # logging.info(" evaluation ")
+        # eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
+        # eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+        #         beam_size=2, eval_model=eval_model)
+        # eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+        #             beam_size=3, eval_model=eval_model)
+
+        eval_with_beam_visualization(evaluation_beam, max_len=30, sos_ind=sos_ind, eos_ind=eos_ind, word_dict_pickle_path=word_dict_pickle_path,
+                        beam_size=4, eval_model=eval_model)
+        
+        # eval_with_beam_csv(evaluation_beam, max_len=30, sos_ind=sos_ind, eos_ind=eos_ind, word_dict_pickle_path=word_dict_pickle_path,
+        #                 beam_size=4, eval_model=eval_model)
+        
+        # print("epoch is {}".format(epoch))
+        # sys.exit()
+        # epoch += 1
 
     elif hp.mode == 'test':
-        # Generate caption(in test_out.csv)
-        # model.load_state_dict(torch.load("./models/final_sub_rl_tagandpre/35.pt",map_location="cpu")['model'])
         model.load_state_dict(torch.load("./models/seed1234_truth_add_pretraintagloss_rl/55.pt",map_location='cpu')['model'])
-        # model.load_state_dict(torch.load("./models/final_sub_rl_notagpre/85.pt",map_location='cpu')['model'])
-        
-        # test_with_beam(test_data, beam_size=4, eval_model=eval_model,name="final_sub_rl_notagpre")
         test_with_beam(test_data, beam_size=4, eval_model=eval_model,name="seed1234_truth_add_pretraintagloss_rl_analysis")
 

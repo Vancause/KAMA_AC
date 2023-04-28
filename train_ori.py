@@ -12,37 +12,35 @@ import sys
 import logging
 import csv
 import random
-from util import get_file_list, get_padding, print_hparams, greedy_decode, get_word_dict,\
+from util import get_file_list, get_padding, print_hparams, greedy_decode, \
     calculate_bleu, calculate_spider, LabelSmoothingLoss, beam_search, align_word_embedding, gen_str, Mixup, tgt2onehot, do_mixup, get_eval
 from hparams import hparams
 from torch.utils.tensorboard import SummaryWriter
 import argparse
-from torch.nn import CrossEntropyLoss,BCELoss,BCEWithLogitsLoss
-from scripts.scst import scst_loss,RewardCriterion,get_self_critical_reward
-import pdb
-from coco_caption.pycocoevalcap.cider.cider import Cider
-from sklearn import metrics
 
-scorer = Cider()
 hp = hparams()
 parser = argparse.ArgumentParser(description='hparams for model')
 
-device = torch.device(hp.device)
+
 np.random.seed(hp.seed)
 torch.manual_seed(hp.seed)
+random.seed(hp.seed)
+
 def clip_bce(output_dict, target_dict):
-    return F.binary_cross_entropy(
+    """Binary crossentropy loss.
+    """
+    # return F.binary_cross_entropy(
+    #     output_dict, target_dict)
+    return F.binary_cross_entropy_with_logits(
         output_dict, target_dict)
 def train(epoch, max_epoch, mixup=False, augmentation=None):
     model.train()
     total_loss_text = 0.
     start_time = time.time()
     batch = 0
-    total_cider = 0
-    loss_tags = 0
     return_loss = []
     with torch.autograd.set_detect_anomaly(True):
-        for src, tgt, tgt_len, ref,filename, tags in training_data:
+        for src, tgt, tgt_len, ref, filename in training_data:
             tgt_y = tgt[:, 1:]
             if mixup:
                 mixup_lambda = augmentation.get_lambda(src.shape[0])
@@ -55,20 +53,20 @@ def train(epoch, max_epoch, mixup=False, augmentation=None):
             tgt_in = tgt[:, :-1]
             tgt_pad_mask = tgt_pad_mask[:, :-1]
             tgt_y = tgt_y.to(device)
-            # tags = tags.to(device).float()
             optimizer.zero_grad()
+            output = model(src, tgt_in, epoch, max_epoch)
+            # No padding for loss calculation
+            if hp.NopadLoss:
+                tgt_y_ = torch.cat([tgt_y[j][:tgt_len[j]-1] for j in range(tgt_y.shape[0])], 0)
+                output_ = torch.cat([output[j][:tgt_len[j]-1] for j in range(tgt_y.shape[0])], 0)
+            else:
+                tgt_y_ = tgt_y
+                output_ = output
 
-            model.eval()
-            with torch.no_grad():
-                (greedy_res,_),classifies  = model._sample(src, tgt, sample_method='greedy')
-                # print(greedy_res)
-            model.train()
-            (gen_result, sample_logprobs),_ = model._sample(src, tgt, sample_method='sample')
-            reward, scores_mean = get_self_critical_reward(greedy_res, ref, gen_result, word_list,scorer)
-            total_cider += scores_mean
-            loss_text = criterion(sample_logprobs, gen_result, reward.to(device))
-            
-            # loss_tag = clip_bce(classifies, tags)
+            if mixup:
+                loss_text = clip_bce(output_, tgt_y_)
+            else:
+                loss_text = criterion(output_.contiguous().view(-1, hp.ntoken), tgt_y_.contiguous().view(-1))
 
             loss = loss_text
             loss.backward()
@@ -76,49 +74,37 @@ def train(epoch, max_epoch, mixup=False, augmentation=None):
             optimizer.step()
             total_loss_text += loss_text.item()
             return_loss.append(loss_text.item())
-            # loss_tags += loss_tag.item()
+            
             writer.add_scalar('Loss/train-text', loss_text.item(), (epoch - 1) * len(training_data) + batch)
 
             batch += 1
 
             if batch % hp.log_interval == 0 and batch > 0:
                 mean_text_loss = total_loss_text / hp.log_interval
-                mean_cider = total_cider / hp.log_interval
-                mean_loss_tags = loss_tags / hp.log_interval
                 elapsed = time.time() - start_time
                 current_lr = [param_group['lr'] for param_group in optimizer.param_groups][0]
                 logging.info('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.2e} | ms/batch {:5.2f} | '
-                            'loss-text {:5.4f} | mean cider {:5.5f} | loss-tag {:5.4f}'.format(
+                            'loss-text {:5.4f}'.format(
                     epoch, batch, len(training_data), current_lr,
-                    elapsed * 1000 / hp.log_interval, mean_text_loss, mean_cider, mean_loss_tags))
-                # torch.save(model.state_dict(), '{log_dir}/{epoch}_{iterations}.pt'.format(log_dir=log_dir, epoch=epoch,iterations=batch))
+                    elapsed * 1000 / hp.log_interval, mean_text_loss))
+                
                 total_loss_text = 0
-                total_cider = 0
-                loss_tags = 0.
                 start_time = time.time()
     return np.mean(return_loss)
+
 def eval_all(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_path=None, eval_model='Transformer'):
     model.eval()
     
     with torch.no_grad():
         output_sentence_all = []
         ref_all = []
-        pred_output = []
-        all_tag = []
-        loss_eval = []
-        for src, tgt, _, ref, filename, tags in evaluation_data:
+        for src, tgt, _, ref, filename in evaluation_data:
             src = src.to(device)
-            tags = tags.to(device).float()
             if eval_model == 'Transformer':
                 output = greedy_decode(model, src, max_len=max_len)
                 
             else:
-                output, classifies = model.greedy_decode(src)
-            loss_tag = clip_bce(classifies, tags)
-            pred_output.extend(classifies.cpu().numpy())
-            all_tag.extend(tags.cpu().numpy())
-            loss_eval.append(loss_tag.item())
-
+                output = model.greedy_decode(src)
 
             output_sentence_ind_batch = []
             for i in range(output.size()[0]):
@@ -130,29 +116,21 @@ def eval_all(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_path=None,
                 output_sentence_ind_batch.append(output_sentence_ind)
             output_sentence_all.extend(output_sentence_ind_batch)
             ref_all.extend(ref)
-        pred_output = np.array(pred_output)
-        all_tag = np.array(all_tag)
-        mean_loss = np.mean(loss_eval)
-        average_precision = metrics.average_precision_score(
-                all_tag, pred_output, average=None)
+        print(len(ref_all))
         score, output_str, ref_str = calculate_spider(output_sentence_all, ref_all, word_dict_pickle_path)
-
-        # loss_mean = score
-        # writer.add_scalar(f'Loss/eval_greddy', loss_mean, epoch)
-        # msg = f'eval_greddy SPIDEr: {loss_mean:2.4f}'
-        # logging.info(msg)
+        
         loss_mean = score
         writer.add_scalar(f'Loss/eval_greddy', loss_mean, epoch)
-        # pdb.set_trace()
-        msg = f'eval_greddy SPIDEr: {loss_mean:2.4f} | loss_tag: {mean_loss:2.5f} | mAP: {np.mean(average_precision):2.5f}'
+        msg = f'eval_greddy SPIDEr: {loss_mean:2.4f}'
         logging.info(msg)
    
 def eval_with_beam(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_path=None, beam_size=3, eval_model='Transformer'):
     model.eval()
     with torch.no_grad():
+        
         output_sentence_all = []
         ref_all = []
-        for src, tgt, _, ref,filename, tags in evaluation_data:
+        for src, tgt, _, ref,filename in evaluation_data:
             src = src.to(device)
 
             if eval_model == 'Transformer':
@@ -207,11 +185,45 @@ def test_with_beam(test_data, max_len=30, eos_ind=9, beam_size=3,eval_model='Tra
                 out_str = gen_str(output_sentence_ind_batch, hp.word_dict_pickle_path)
                 for caption, fn in zip(out_str, filename):
                     writer.writerow(['{}.wav'.format(fn), caption])
+
+def eval_with_beam_csv(evaluation_data, max_len=30, eos_ind=9, word_dict_pickle_path=None, beam_size=3, eval_model='Transformer'):
+    model.eval()
+
+    with torch.no_grad():
+        with open("test_out.csv", "w") as f:
+            writer = csv.writer(f)
+            writer.writerow(['filename','caption_groudtruth','caption_predicted'])
+            for src, tgt, _, ref, filename in evaluation_data:
+                print(src.shape)
+                src = src.to(device)
+                tgt = tgt.numpy().tolist()
+                if eval_model == 'Transformer':
+                    output = beam_search(model, src, max_len, start_symbol_ind=0, beam_size=beam_size)
+                else:
+                    output = model.beam_search(src, beam_width=beam_size)
+                output_sentence_ind_batch = []
+                for single_sample in output:
+                    output_sentence_ind = []
+                    for sym in single_sample:
+                        if sym == eos_ind: break
+                        if eval_model == 'Transformer':
+                            output_sentence_ind.append(sym.item())
+                        else:
+                            output_sentence_ind.append(sym)
+                    output_sentence_ind_batch.append(output_sentence_ind)
+                
+                out_str = gen_str(output_sentence_ind_batch, hp.word_dict_pickle_path)
+                _ , ref_str = get_eval(tgt, ref, hp.word_dict_pickle_path)
+                
+                # print(ref_str[0])
+                for caption, groundtruth,fname in zip(out_str, ref_str,filename):
+                    writer.writerow([fname,groundtruth,caption])
 if __name__ == '__main__':
     parser.add_argument('--device', type=str, default=hp.device)
     parser.add_argument('--nlayers', type=int, default=hp.nlayers)
     parser.add_argument('--nhead', type=int, default=hp.nhead)
     parser.add_argument('--nhid', type=int, default=hp.nhid)
+    parser.add_argument('--batch_size', type=int, default=hp.batch_size)
     parser.add_argument('--training_epochs', type=int, default=hp.training_epochs)
     parser.add_argument('--lr', type=float, default=hp.lr)
     parser.add_argument('--scheduler_decay', type=float, default=hp.scheduler_decay)
@@ -221,30 +233,72 @@ if __name__ == '__main__':
     parser.add_argument('--load_pretrain_model', action='store_true')
     parser.add_argument('--spec_augmentation', action='store_true')
     parser.add_argument('--label_smoothing', action='store_true')
+    parser.add_argument('--multi_gpu', action='store_true')
     parser.add_argument('--name', type=str, default=hp.name)
+    parser.add_argument('--mode', type=str, default=hp.mode)
+    parser.add_argument('--eval_dir', type=str, default=hp.eval_dir)
     parser.add_argument('--pretrain_emb_path', type=str, default=hp.pretrain_emb_path)
     parser.add_argument('--pretrain_cnn_path', type=str, default=hp.pretrain_cnn_path)
     parser.add_argument('--pretrain_model_path', type=str, default=hp.pretrain_model_path)
     parser.add_argument('--Decoder', type=str, default=hp.decoder)
-    parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument('--resume', type=str, default='')
     args = parser.parse_args()
     for k, v in vars(args).items():
         setattr(hp, k, v)
     args = parser.parse_args()
+
+    device = torch.device(hp.device)
     eval_model = hp.decoder
     pretrain_emb = align_word_embedding(hp.word_dict_pickle_path, hp.pretrain_emb_path, hp.ntoken,
                                         hp.emb_size,load_type='bert') if hp.load_pretrain_emb else None
     pretrain_cnn = torch.load(hp.pretrain_cnn_path, map_location="cpu") if hp.load_pretrain_cnn else None
-
-    model = AttModel(hp.ninp,hp.nhid,hp.output_dim_encoder,hp.emb_size,hp.dropout_p_encoder,
+    
+    if hp.decoder == 'AttDecoder':
+        if hp.load_pretrain_emb:
+            print("load pretrain embedding")
+        model = AttModel(hp.ninp,hp.nhid,hp.output_dim_encoder,hp.emb_size,hp.dropout_p_encoder,
         hp.output_dim_h_decoder,hp.ntoken,hp.dropout_p_decoder,hp.max_out_t_steps,device,'tag',pretrain_emb,hp.tag_emb,
         hp.multiScale,hp.preword_emb,hp.two_stage_cnn,hp.usingLM).to(device)
-    print("pretrain model path is",hp.pretrain_model_path)
-    model.load_state_dict(torch.load(hp.pretrain_model_path, map_location="cpu")['model'])
+        print("The model is", hp.decoder)
+        if pretrain_cnn is not None:
+            dict_trained = pretrain_cnn
+            dict_new = model.encoder.state_dict().copy()
+            new_list = list(model.encoder.state_dict().keys())
+            trained_list = list(dict_trained.keys())
+            for i in range(len(new_list)):
+                print(new_list[i])
+                dict_new[new_list[i]] = dict_trained[trained_list[i]]
+            model.encoder.load_state_dict(dict_new)
+            if hp.two_stage_cnn:
+                model.encoder_fixed.load_state_dict(dict_new)
+    elif hp.decoder == 'Transformer': # no used now
+        model = TransformerModel(hp.ntoken, hp.ninp, hp.nhead, hp.nhid, hp.nlayers, hp.batch_size, dropout=0.2,
+                             pretrain_cnn=pretrain_cnn, pretrain_emb=pretrain_emb, freeze_cnn=hp.freeze_cnn).to(device)
+    else :
+        print('exit!!!')
+        sys.exit(0)
+
+    if hp.load_pretrain_model:
+        model.load_state_dict(torch.load(hp.pretrain_model_path,map_location="cpu"))
+    print("freeze_cnn", hp.freeze_cnn)
+    if hp.freeze_cnn:
+        model.freeze_cnn()
+        print("freeze_cnn has finished!")
+    if hp.freeze_classifer and hp.two_stage_cnn:
+        model.freeze_classifer()
+        print("freeze_classifer has finished!")
 
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=hp.lr, weight_decay=1e-6)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, hp.scheduler_decay)
-    criterion = RewardCriterion()
+
+    if hp.label_smoothing:
+        criterion = LabelSmoothingLoss(hp.ntoken, smoothing=0.1, word_freq=hp.word_freq_reciprocal_pickle_path)
+    else:
+        criterion = nn.CrossEntropyLoss(ignore_index=hp.ntoken - 1)
+    if hp.multi_gpu:
+        device_ids = [4,5]
+        # model.to(device)
+        model = torch.nn.DataParallel(model,device_ids=device_ids)
 
     now_time = str(time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime(time.time())))
     log_dir = 'models/{name}'.format(name=hp.name)
@@ -252,25 +306,17 @@ if __name__ == '__main__':
     writer = SummaryWriter(log_dir=log_dir)
 
     log_path = os.path.join(log_dir, 'train.log')
-    
-    if hp.resume is not None:
+
+    if args.resume:
         print("use resume")
-        checkpoint = torch.load(hp.resume)
-        
-        # model.load_state_dict(checkpoint)
+        checkpoint = torch.load(args.resume)
         model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         scheduler.load_state_dict(checkpoint['scheduler'])
         epoch = checkpoint['epoch']
-        print(epoch, optimizer, scheduler)
-        epoch = epoch +1
-        # pdb.set_trace()
     else:
         print("train from scratch")
         epoch = 1
-    # device_ids = [4,5,6]
-    # # model.to(device)
-    # model = torch.nn.DataParallel(model,device_ids=device_ids)
 
     logging.basicConfig(level=logging.DEBUG,
                         format=
@@ -286,9 +332,7 @@ if __name__ == '__main__':
     word_dict_pickle_path = hp.word_dict_pickle_path
     word_freq_pickle_path = hp.word_freq_pickle_path
     test_data_dir = hp.test_data_dir
-
-    word_list = get_word_dict(word_dict_pickle_path)
-    # pdb.set_trace()
+    num_workers = 2
     if hp.train_all:
         training_data = get_clotho_loader(data_dir=data_dir, split='all',
                                         input_field_name='features',
@@ -296,7 +340,7 @@ if __name__ == '__main__':
                                         load_into_memory=False,
                                         batch_size=hp.batch_size,
                                         nb_t_steps_pad='max',
-                                        num_workers=4, return_reference=True, augment=hp.spec_augmentation)
+                                        num_workers=num_workers, return_reference=True, augment=hp.spec_augmentation)
     else:
         training_data = get_clotho_loader(data_dir=data_dir, split='development',
                                         input_field_name='features',
@@ -304,16 +348,18 @@ if __name__ == '__main__':
                                         load_into_memory=False,
                                         batch_size=hp.batch_size,
                                         nb_t_steps_pad='max',
-                                        num_workers=4, return_reference=True, augment=hp.spec_augmentation)
+                                        num_workers=num_workers, return_reference=True, augment=hp.spec_augmentation)
+
     validation_beam = get_clotho_loader(data_dir=data_dir, split='validation',
-                                    input_field_name='features',
-                                    output_field_name='words_ind',
-                                    load_into_memory=False,
-                                    batch_size=32,
-                                    nb_t_steps_pad='max',
-                                    shuffle=False,
-                                    drop_last=False,
-                                    return_reference=True)
+                                        input_field_name='features',
+                                        output_field_name='words_ind',
+                                        load_into_memory=False,
+                                        batch_size=32,
+                                        nb_t_steps_pad='max',
+                                        num_workers=num_workers,
+                                        shuffle=False,
+                                        drop_last=False,
+                                        return_reference=True)
 
     evaluation_beam = get_clotho_loader(data_dir=data_dir, split='evaluation',
                                         input_field_name='features',
@@ -321,16 +367,18 @@ if __name__ == '__main__':
                                         load_into_memory=False,
                                         batch_size=32,
                                         nb_t_steps_pad='max',
+                                        num_workers=num_workers,
                                         shuffle=False,
                                         drop_last=False,
                                         return_reference=True)
     test_data = get_test_data_loader(data_dir=test_data_dir,
                                      batch_size=hp.batch_size * 2,
                                      nb_t_steps_pad='max',
+                                     num_workers=num_workers,
                                      shuffle=False,
                                      drop_last=False,
                                      input_pad_at='start',
-                                     num_workers=8)
+                                     )
     logging.info(str(model))
 
     logging.info(str(print_hparams(hp)))
@@ -339,37 +387,23 @@ if __name__ == '__main__':
     logging.info('Data size: ' + str(len(training_data)))
 
     logging.info('Total Model parameters: ' + str(sum(p.numel() for p in model.parameters() if p.requires_grad)))
-    
-    
-
+    epoch = 1
     print('mixup is ',hp.mixup)
-    # pdb.set_trace()
     if hp.mixup:
         mixup_augmentation = Mixup(mixup_alpha=1.0)
     else :
         mixup_augmentation = None
-    # epoch = 1
     if hp.mode == 'train':
 
-        # torch.save({
-        #         'model': model.state_dict(),
-        #         'optimizer': optimizer.state_dict(),
-        #         'epoch': epoch,
-        #         'scheduler': scheduler.state_dict(),
-        #     }, '{log_dir}/{num_epoch}.pt'.format(log_dir=log_dir, num_epoch=epoch))
-        # eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
-        # eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-        #                 beam_size=2, eval_model=eval_model)
-        # eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-        #                 beam_size=3, eval_model=eval_model)
-        # eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-        #                 beam_size=4, eval_model=eval_model)
         while epoch < hp.training_epochs + 1:
+            
             epoch_start_time = time.time()
             tr_loss = train(epoch, hp.training_epochs, hp.mixup, mixup_augmentation)
             logging.info('| epoch {:3d} | loss-mean-text {:5.4f}'.format(
                     epoch, tr_loss))
+            torch.save(model.state_dict(), '{log_dir}/{num_epoch}.pt'.format(log_dir=log_dir, num_epoch=epoch))
             scheduler.step(epoch)
+            
             # if epoch % 5 == 0:
             #     eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
             #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
@@ -378,30 +412,56 @@ if __name__ == '__main__':
             #                 beam_size=3, eval_model=eval_model)
             #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
             #                 beam_size=4, eval_model=eval_model)
-            # else:
+            # elif epoch > 20:
             #     eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
+            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+            #                 beam_size=2, eval_model=eval_model)
+            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+            #                 beam_size=3, eval_model=eval_model)
+            #     eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+            #                 beam_size=4, eval_model=eval_model)
+            # else:
+            #     pass
+            if epoch % 5 == 0:
+                eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
+                eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+                            beam_size=2, eval_model=eval_model)
+                eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+                            beam_size=3, eval_model=eval_model)
+                eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+                            beam_size=4, eval_model=eval_model)
+            else:
+                eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
             torch.save({
                 'model': model.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'epoch': epoch,
                 'scheduler': scheduler.state_dict(),
             }, '{log_dir}/{num_epoch}.pt'.format(log_dir=log_dir, num_epoch=epoch))
-            epoch += 1
-    elif hp.mode == 'eval':
-        epoch = 8
-        while epoch < hp.training_epochs + 1:
-            logging.info("The epoch is {}".format(epoch))
-            model.load_state_dict(torch.load("./models/"+hp.eval_dir+str(epoch)+".pt",map_location="cpu"))
-            eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
-            eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-                           beam_size=2, eval_model=eval_model)
-            eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-                           beam_size=3, eval_model=eval_model)
-            eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
-                           beam_size=4, eval_model=eval_model)
-            epoch += 1
-    
 
+            epoch += 1
         
 
+    if hp.mode == 'eval':
+        epoch = 1
+        while epoch < hp.training_epochs + 1:
+            # Evaluation model score
+            logging.info("The epoch is {}".format(epoch))
+            # model.load_state_dict(torch.load("../DCASE2021_Task6/models/ensemble_models/50.pt",map_location="cpu"))
+            model.load_state_dict(torch.load("./models/seed1234/30.pt",map_location="cpu"))
+            logging.info(" evaluation ")
+            eval_all(evaluation_beam, word_dict_pickle_path=word_dict_pickle_path, eval_model=eval_model)
+            eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+                    beam_size=2, eval_model=eval_model)
+            eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+                        beam_size=3, eval_model=eval_model)
+            eval_with_beam(evaluation_beam, max_len=30, eos_ind=9, word_dict_pickle_path=word_dict_pickle_path,
+                        beam_size=4, eval_model=eval_model)
+            
+            epoch += 1
+
+    elif hp.mode == 'test':
+        # Generate caption(in test_out.csv)
+        model.load_state_dict(torch.load("./models/seed1111_rl_trainall/8.pt",map_location="cpu"))
+        test_with_beam(test_data, beam_size=4, eval_model=eval_model,name="seed1111_rl")
 

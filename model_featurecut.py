@@ -129,41 +129,7 @@ class Tag2Encodeout(nn.Module):
         score = self.softmax(dot)
         att_res = torch.bmm(score,value).mean(dim=1)
         return att_res, score
-class SpatialDropout(nn.Module):
-    """
-    空间dropout,即在指定轴方向上进行dropout,常用于Embedding层和CNN层后
-    如对于(batch, timesteps, embedding)的输入,若沿着axis=1则可对embedding的若干channel进行整体dropout
-    若沿着axis=2则可对某些token进行整体dropout
-    """
-    def __init__(self, drop=0.5):
-        super(SpatialDropout, self).__init__()
-        self.drop = drop
-        
-    def forward(self, inputs, noise_shape=None):
-        """
-        @param: inputs, tensor
-        @param: noise_shape, tuple, 应当与inputs的shape一致,其中值为1的即沿着drop的轴
-        """
-        outputs = inputs.clone()
-        if noise_shape is None:
-            noise_shape = (inputs.shape[0], *repeat(1, inputs.dim()-2), inputs.shape[-1])   # 默认沿着中间所有的shape
-        
-        self.noise_shape = noise_shape
-        if not self.training or self.drop == 0:
-            return inputs
-        else:
-            noises = self._make_noises(inputs)
-            if self.drop == 1:
-                noises.fill_(0.0)
-            else:
-                noises.bernoulli_(1 - self.drop).div_(1 - self.drop)
-            noises = noises.expand_as(inputs)    
-            outputs.mul_(noises)
-            return outputs
-            
-    def _make_noises(self, inputs):
-        return inputs.new().resize_(self.noise_shape)
-    
+ 
 class AttDecoder(Module):
 
     def __init__(self,
@@ -209,16 +175,14 @@ class AttDecoder(Module):
             self.init_h = nn.Linear(input_dim, output_dim)
             self.init_c = nn.Linear(input_dim, output_dim)
             self.linear_feature = nn.Linear(2048, input_dim)
-        
-        # pdb.set_trace()
+
         if tag_emb:
             if dataset == 'Clotho':
                 self.tagging_to_embs = torch.tensor(pickle.load(open(hp.tagging_to_embs, 'rb')))
             else:
                 self.tagging_to_embs = torch.tensor(pickle.load(open(hp.tagging_to_embs_audiocaps, 'rb')))
-            self.preword_attention = Attention(emb_dim, output_dim, att_dim, output_dim)
+            self.taggingword_attention = Attention(emb_dim, output_dim, att_dim, output_dim)
             self.f_beta_taggingword = nn.Linear(input_dim, output_dim)
-        # pdb.set_trace()
         if preword_emb:
             self.preword_attention = Attention(emb_dim, output_dim, att_dim, output_dim)
             self.f_beta_preword = nn.Linear(input_dim, output_dim)  # linear layer to create a sigmoid-activated gate
@@ -239,8 +203,6 @@ class AttDecoder(Module):
         self.device = device
         self.emb_dim = emb_dim
         self.topk = topk_keywords
-
-        # pdb.set_trace()
         if dataset == 'Clotho':
             self.sos = 0
             self.eos = 9
@@ -254,7 +216,7 @@ class AttDecoder(Module):
             print('Random word embedding!')
             self.word_emb = nn.Embedding(self.nb_classes, emb_dim, pretrain_emb)
         print("word lens: {}".format(self.nb_classes))
-        print('dataset {}'.format(dataset))
+        print('dataset {}'.format(dataset))        
     def init_hidden_state(self, encoder_out, encoder_out1=None, encoder_out2=None):
         if self.multiScale:
             mean_encoder_out = encoder_out.mean(dim=1)
@@ -303,11 +265,12 @@ class AttDecoder(Module):
             previous_wordemb = torch.zeros(batch_size, 1, self.emb_dim,requires_grad=False).to(device) # (B,T,outputdim=512)
         word = self.word_emb(torch.zeros(batch_size).long().to(device))
         word = self.word_drop(word)
-        
+        aggregate_att = []
         for t in range(y.shape[1]):
             teacher_focing_ratio = linear_decay(epoch, max_epoch, rate=.7)
             use_teacher_focing = random.random() < teacher_focing_ratio
             attention_weighted_encoding, alpha = self.attention(x, h)
+            aggregate_att.append(alpha)
             if self.multiScale:
                 attention_weighted_encoding1, alpha1 = self.attention1(x1, h)
                 attention_weighted_encoding2, alpha2 = self.attention2(x2, h)
@@ -351,7 +314,7 @@ class AttDecoder(Module):
             if self.preword_emb:
                 previous_wordemb = torch.cat((previous_wordemb,p),1)
 
-        return predictions
+        return predictions, aggregate_att
     
 
     def forward(self,
@@ -365,14 +328,14 @@ class AttDecoder(Module):
         :rtype: torch.Tensor
         """
         
-        predictions = self.trainer(x,x1,x2,y,epoch,max_epoch,mixup_lambda,classify)
+        predictions, aggregate_att = self.trainer(x,x1,x2,y,epoch,max_epoch,mixup_lambda,classify)
                 
-        return predictions
+        return predictions, aggregate_att
 
     def sample(self, x, x1,x2, y,classify,sample_method):
         device = x.device
-        BOS = self.sos
-        EOS = self.eos
+        BOS = self.sos 
+        EOS = self.eos 
         batch_size = x.size(0)
         # prepare feats, h and c
         x = x.transpose(1, 2)
@@ -456,6 +419,8 @@ class AttDecoder(Module):
             # return h,c, it, word_prob
 
     def translate_greedy(self, x, x1, x2, classify=None):
+        # BOS = 0
+        # EOS = 9
         BOS = self.sos
         EOS = self.eos
         max_len = self.maxlength
@@ -501,13 +466,11 @@ class AttDecoder(Module):
 
 
     def translate_beam_search(self, x, x1, x2, beam_width=2, alpha=1.15, topk=1, number_required=None, classify=None, usingLM=False):
-        # 1.15
         if number_required is None:
             number_required = beam_width
         BOS = self.sos
         EOS = self.eos
         max_len = self.maxlength
-        # pdb.set_trace()
         if usingLM:
             LMmodel = myGPT()
             LMmodel.eval()
@@ -633,7 +596,6 @@ class AttDecoder(Module):
 
             utterances = []
             count = 1
-            
             for score, n in sorted(endnodes, key=operator.itemgetter(0)):
                 if count > topk: break
                 count += 1
@@ -653,7 +615,7 @@ class AttDecoder(Module):
                 utterances.append(utterance)
                 
             seq_preds.append(utterances)
-        # pdb.set_trace()
+            
         seq_preds = np.array(seq_preds)
         seq_preds = torch.from_numpy(seq_preds[:,0,:][:,:,None]).to(device)
         seq_preds = torch.zeros(batch_size, self.maxlength, self.nb_classes).to(device).scatter_(2,seq_preds,1)
@@ -754,6 +716,15 @@ class AttModel(Module):
         output = self.decoder(h_encoder, h_encoder1, h_encoder2, y, epoch, max_epoch, mixup_lambda, classify)
 
         return output, classify
+    def encode(self,x):
+        classifies, features, _, _  = self.encoder(x)
+        return features, classifies
+
+    def decode(self, x, y, epoch, max_epoch,mixup_lambda=None,target_padding_mask=None, classify=None):
+
+        output, aggregate_att = self.decoder(x, None, None, y, epoch, max_epoch, mixup_lambda, classify=classify)
+        return output, aggregate_att 
+    
     def _sample(self, x, y, sample_method):
         if self.two_stage_cnn:
             classify, _, _, _ = self.encoder_fixed(x)
@@ -798,7 +769,155 @@ class AttModel(Module):
     def freeze_classifer(self):
         for p in self.encoder_fixed.parameters():
             p.requires_grad = False
+    
+    # def preprocess_features_FAT(self, features,FAT,filenames, ratio=0.9): # original
+    #     '''
+    #     features: (B,C,T)
+    #     '''
+    #     batch_size = features.shape[0]
+    #     num = features.shape[-1]
+    #     channel = features.shape[1]
+    #     device = features.device
+    #     tosample = int(num * ratio)
+    #     tomask = num - tosample
 
+    #     # sample_features = torch.zeros(batch_size, channel, tosample).to(device)
+
+    #     sample_features = torch.zeros(batch_size, channel, tosample).to(device)
+    #     mask = torch.ones(batch_size,num).to(device)
+    #     events = list(FAT.keys())
+    #     for i in range(batch_size):
+    #         filename = filenames[i]
+    #         if filename not in events:
+    #             indices = np.random.permutation(num)[:tosample]
+    #             indices = sorted(indices)
+    #             sample_features[i, :, :] = features[i, :, indices] 
+    #         else:
+    #             attention_weights = FAT[filename]
+    #             # print(attention_weights,attention_weights.shape,tosample)
+    #             # print("----------")
+    #             # attention_weights = F.softmax(attention_weights,dim=0)
+    #             # print(attention_weights)
+    #             # print("----------")
+    #             # e_num = attention_weights.shape[0]
+    #             # e_num = int(e_num*0.1)
+    #             idxs = np.arange(num)
+    #             # print(num,tosample)
+    #             # print(e_num)
+    #             indices = torch.multinomial(attention_weights,tomask).cpu().numpy()
+    #             # print(indices)
+    #             indices_ = list(set(idxs) - set(indices))
+    #             # print(indices_,len(indices_))
+    #             # print("----------")
+    #             indices = sorted(torch.as_tensor(indices_))
+    #             # print(indices)
+    #             # print("----------")
+    #             # print('----end-----')
+    #             # print(indices)
+    #             sample_features[i, :, :] = features[i, :, indices] 
+    #     # print("_________________")
+    #     return sample_features
+    
+    def preprocess_features_FAT(self, features,FAT,filenames, ratio=0.9):
+        '''
+        features: (B,C,T)
+        '''
+        batch_size = features.shape[0]
+        num = features.shape[-1]
+        channel = features.shape[1]
+        device = features.device
+        tosample = int(num * ratio)
+        tomask = num - tosample
+
+        # sample_features = torch.zeros(batch_size, channel, tosample).to(device)
+
+        sample_features = torch.zeros(batch_size, channel, tosample).to(device)
+        mask = torch.ones(batch_size,num).to(device)
+        # pdb.set_trace()
+        if FAT is not None:
+            events = list(FAT.keys())
+        else:
+            events = []
+        # fat_batch = [FAT[f] for f in filenames]
+        # fat_lens = [len(f) for f in fat_batch]
+
+        all_lens = []
+        max_lens = features.shape[-1]
+        final_attention_weight = []
+        exist_fat = False
+        # pdb.set_trace()
+        
+        for i in range(batch_size):
+            filename = filenames[i]
+            if filename not in events:
+                padding = torch.zeros(max_lens).float().to(device)
+                padding += 1
+                final_attention_weight.append(padding.unsqueeze(0))
+            else:
+                attention_weights = FAT[filename].to(device)
+                padding = torch.zeros(max_lens - attention_weights.shape[0]).float().to(device)
+                
+                final_attention_weight.append(torch.cat((attention_weights,padding)).unsqueeze(0))
+                exist_fat = True 
+
+
+        final_attention_weight = torch.cat(final_attention_weight)
+        # if not exist_fat:
+        #     final_attention_weight += 1.0
+        indices = torch.multinomial(final_attention_weight,tosample)
+        indices = torch.sort(indices,-1)[0]
+        x_ind = torch.arange(0,32).to(device).unsqueeze(1)
+        x_ind = x_ind.repeat(1,indices.shape[-1])
+        sample_features = features[x_ind,:,indices].transpose(2,1)
+        return sample_features
+        # for i in range(batch_size):
+        #     filename = filenames[i]
+        #     if filename not in events:
+        #         indices = np.random.permutation(num)[:tosample]
+        #         indices = sorted(indices)
+        #         sample_features[i, :, :] = features[i, :, indices] 
+        #     else:
+        #         attention_weights = FAT[filename]
+        #         # print(attention_weights,attention_weights.shape,tosample)
+        #         # print("----------")
+        #         # attention_weights = F.softmax(attention_weights,dim=0)
+        #         # print(attention_weights)
+        #         # print("----------")
+        #         # e_num = attention_weights.shape[0]
+        #         # e_num = int(e_num*0.1)
+        #         idxs = np.arange(num)
+        #         # print(num,tosample)
+        #         # print(e_num)
+        #         indices = torch.multinomial(attention_weights,tomask).cpu().numpy()
+        #         # print(indices)
+        #         indices_ = list(set(idxs) - set(indices))
+        #         # print(indices_,len(indices_))
+        #         # print("----------")
+        #         indices = sorted(torch.as_tensor(indices_))
+        #         # print(indices)
+        #         # print("----------")
+        #         # print('----end-----')
+        #         # print(indices)
+        #         sample_features[i, :, :] = features[i, :, indices] 
+        # # print("_________________")
+        # return sample_features
+    
+    def preprocess_feature_random(self, features, ratio):
+        batch_size = features.shape[0]
+        num = features.shape[-1]
+        channel = features.shape[1]
+        device = features.device
+        tosample = int(num*ratio)
+        # tomask = num - tosample
+
+        sample_features = torch.zeros(batch_size, channel, tosample).to(device)
+        
+        for i in range(batch_size):
+            indices = np.random.permutation(num)[:tosample]
+            indices = sorted(indices)
+            sample_features[i, :, :] = features[i, :, indices] 
+        return sample_features
+    
 ## Transformer
 class PositionalEncoding(nn.Module):
 
@@ -824,10 +943,15 @@ class PositionalEncoding(nn.Module):
 class TransformerModel(nn.Module):
 
     def __init__(self, ntoken, ninp, nhead, nhid, nlayers, batch_size, dropout=0.5,pretrain_cnn=None,
-                 pretrain_emb=None,freeze_cnn=True, dim_feedforward=2048, use_tags=False, use_threshold=False, threshold=0.4, use_newtrans=False,topk_keywords=5, dataset='Clotho'):
+                 pretrain_emb=None,freeze_cnn=True, dim_feedforward=2048, use_tags=False, use_threshold=False, threshold=0.4, use_newtrans=False,topk_keywords=5, dataset='Clotho', use_mei=False):
         super(TransformerModel, self).__init__()
 
         self.model_type = 'cnn+transformer'
+        if not use_newtrans:
+            from transformer import TransformerDecoder,TransformerDecoderLayer
+        else:
+            from transformer_idea import TransformerDecoder,TransformerDecoderLayer
+
         decoder_layers = TransformerDecoderLayer(d_model=nhid, nhead=nhead, dropout=dropout, dim_feedforward=dim_feedforward)
         self.transformer_decoder = TransformerDecoder(decoder_layers, nlayers)
         self.word_emb = nn.Embedding(ntoken, nhid)
@@ -841,25 +965,27 @@ class TransformerModel(nn.Module):
         self.eos = 9
         self.warm_up = True
         self.topk_keywords = topk_keywords
-        # self.proj_tag_linear_feat = nn.Linear(2048, nhid)
         # self.fc = nn.Linear(512, 512, bias=True)
         # self.fc1 = nn.Linear(512, nhid, bias=True)
-        self.linear_feature = nn.Linear(2048, nhid)
+        
         if dataset == 'Clotho':
             self.tagging_to_embs = torch.tensor(pickle.load(open(hp.tagging_to_embs, 'rb')))
         else:
             self.tagging_to_embs = torch.tensor(pickle.load(open(hp.tagging_to_embs_audiocaps, 'rb')))
-        # pdb.set_trace()
         self.dec_fc = nn.Linear(nhid, ntoken)
         self.batch_size = batch_size
         self.ntoken = ntoken
         # self.encoder = Cnn10()
-        self.encoder = Tag(500,model_type='resnet38',pretrain_model_path="./models/ResNet38_mAP=0.434.pth",GMAP=False) # 597
+        if use_mei:
+            self.encoder = Tag(500,model_type='Cnn10',pretrain_model_path="./models/Cnn10.pth",GMAP=False)
+            self.linear_feature = nn.Linear(512, nhid)
+        else:
+            self.encoder = Tag(500,model_type='resnet38',pretrain_model_path="./models/ResNet38_mAP=0.434.pth",GMAP=False)
+            self.linear_feature = nn.Linear(2048, nhid)
         self.dropout = nn.Dropout(dropout)
         self.pos_encoder = PositionalEncoding(nhid, dropout)
         self.generator = nn.Softmax(dim=-1)
         
-        # self.spatial_dropout = SpatialDropout(0.2)
         # self.proj_tags = nn.Linear(nhid, nhid)
         self.init_weights()
 
@@ -902,7 +1028,6 @@ class TransformerModel(nn.Module):
         device = a_feat.device 
         eos_token = self.eos
         # pdb.set_trace()       
-        # if self.use_newtrans and epoch <=2:
         if  self.use_threshold  and not self.warm_up:
             index_x, index_y = torch.where(text>=self.threshold)
             
@@ -969,7 +1094,7 @@ class TransformerModel(nn.Module):
         # x = torch.relu(self.fc1(x))
         
 
-    def decode(self, mem_a, mem_t, tgt, input_mask=None, target_mask=None, target_padding_mask=None, epoch=None, text_masks=None):
+    def decode(self, mem_a, mem_t, tgt, input_mask=None, target_mask=None, target_padding_mask=None, epoch=None, text_masks=None, return_weights=False):
         # tgt:(batch_size,T_out)
         # mem:(T_mem,batch_size,nhid)
         
@@ -981,30 +1106,88 @@ class TransformerModel(nn.Module):
             target_mask = self.generate_square_subsequent_mask(len(tgt)).to(device)
 
         tgt = self.dropout(self.word_emb(tgt)) * math.sqrt(self.nhid)
-        # tgt = self.spatial_dropout(self.word_emb(tgt)) * math.sqrt(self.nhid)
         tgt = self.pos_encoder(tgt)
         # mem = self.pos_encoder(mem)
-        # pdb.set_trace()
+        
         if self.use_tags:
             # mem_a = torch.cat((mem_t, mem_a),dim=0)
             if not self.use_newtrans:
-                output = self.transformer_decoder(tgt, mem_a, memory_mask=input_mask, tgt_mask=target_mask,
-                                                tgt_key_padding_mask=target_padding_mask)
+                output, attn_weights = self.transformer_decoder(tgt, mem_a, memory_mask=input_mask, tgt_mask=target_mask,
+                                                tgt_key_padding_mask=target_padding_mask,return_weights=True)
             else:
-                output = self.transformer_decoder(tgt, mem_a, mem_t, memory_mask=input_mask, tgt_mask=target_mask,
-                                              tgt_key_padding_mask=target_padding_mask, text_key_padding_mask=text_masks)
+                output, attn_weights = self.transformer_decoder(tgt, mem_a, mem_t, memory_mask=input_mask, tgt_mask=target_mask,
+                                              tgt_key_padding_mask=target_padding_mask, text_key_padding_mask=text_masks,return_weights=True)
         else:
             
-            output = self.transformer_decoder(tgt, mem_a, memory_mask=input_mask, tgt_mask=target_mask,
-                                            tgt_key_padding_mask=target_padding_mask)
+            output, attn_weights = self.transformer_decoder(tgt, mem_a, memory_mask=input_mask, tgt_mask=target_mask,
+                                            tgt_key_padding_mask=target_padding_mask,return_weights=True)
+        
         output = self.dec_fc(output)
-        return output
+        if return_weights:
+            return output, attn_weights
+        else:
+            return output
 
+    def preprocess_features_FAT(self, features,FAT,filenames, ratio=0.9):
+        '''
+        features: (T,B,C) -> (B,C,T)
+        '''
+        # pdb.set_trace()
+        features = features.permute(1, 2, 0)
+        batch_size = features.shape[0]
+        num = features.shape[-1]
+        channel = features.shape[1]
+        device = features.device
+        tosample = int(num * ratio)
+        tomask = num - tosample
+
+        # sample_features = torch.zeros(batch_size, channel, tosample).to(device)
+
+        # sample_features = torch.zeros(batch_size, channel, tosample).to(device)
+        mask = torch.ones(batch_size,num).to(device)
+        # pdb.set_trace()
+        if FAT is not None:
+            events = list(FAT.keys())
+        else:
+            events = []
+        # fat_batch = [FAT[f] for f in filenames]
+        # fat_lens = [len(f) for f in fat_batch]
+
+        all_lens = []
+        max_lens = features.shape[-1]
+        final_attention_weight = []
+        exist_fat = False
+        # pdb.set_trace()
+        
+        for i in range(batch_size):
+            filename = filenames[i]
+            if filename not in events:
+                padding = torch.zeros(max_lens).float().to(device)
+                padding += 1
+                final_attention_weight.append(padding.unsqueeze(0))
+            else:
+                attention_weights = FAT[filename].to(device)
+                padding = torch.zeros(max_lens - attention_weights.shape[0]).float().to(device)
+                
+                final_attention_weight.append(torch.cat((attention_weights,padding)).unsqueeze(0))
+                exist_fat = True 
+
+
+        final_attention_weight = torch.cat(final_attention_weight)
+        # if not exist_fat:
+        #     final_attention_weight += 1.0
+        indices = torch.multinomial(final_attention_weight,tosample)
+        indices = torch.sort(indices,-1)[0]
+        x_ind = torch.arange(0,32).to(device).unsqueeze(1)
+        x_ind = x_ind.repeat(1,indices.shape[-1])
+        sample_features = features[x_ind,:,indices].transpose(2,1)
+        sample_features = sample_features.permute(2, 0, 1)
+        return sample_features
+    
     def forward(self, src, tgt, epoch=None, max_epoch=None, input_mask=None, target_mask=None, target_padding_mask=None):
         # src:(batch_size,T_in,feature_dim)
         # tgt:(batch_size,T_out)
         mem_a, mem_t, classifies, text_masks = self.encode(src)
-        
         output = self.decode(mem_a, mem_t, tgt, input_mask=input_mask, target_mask=target_mask,
                              target_padding_mask=target_padding_mask, text_masks=text_masks)
         return output, classifies

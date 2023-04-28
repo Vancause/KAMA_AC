@@ -8,6 +8,8 @@ import numpy as np
 import math
 from augmentation import *
 from hparams import hparams as hp
+import pickle 
+import pdb
 def init_layer(layer):
     """Initialize a Linear or Convolutional layer. """
     nn.init.xavier_uniform_(layer.weight)
@@ -95,13 +97,15 @@ class Cnn10(nn.Module):
         x = self.conv_block1(x, pool_size=(2, 2), pool_type='avg')
         x = F.dropout(x, p=0.2, training=self.training)
         x = self.conv_block2(x, pool_size=(2, 2), pool_type='avg')
+        x1 = x
         x = F.dropout(x, p=0.2, training=self.training)
         x = self.conv_block3(x, pool_size=(2, 2), pool_type='avg')
         x = F.dropout(x, p=0.2, training=self.training)
+        x2 = x
         x = self.conv_block4(x, pool_size=(2, 2), pool_type='avg')
         x = F.dropout(x, p=0.2, training=self.training)     #(batch_size, 512, T/16, mel_bins/16)
  
-        return x
+        return x, x1, x2 
 
 def _resnet_conv3x3(in_planes, out_planes):
     #3x3 convolution with padding
@@ -333,12 +337,14 @@ class ResNet38(nn.Module):
         x = self.conv_block1(x, pool_size=(2, 2), pool_type='avg')
         x = F.dropout(x, p=0.2, training=self.training, inplace=True)
         x, x1, x2 = self.resnet(x)
+        # pdb.set_trace()
+        out = x
         x = F.avg_pool2d(x, kernel_size=(2, 2))
         x = F.dropout(x, p=0.2, training=self.training, inplace=True)
         x = self.conv_block_after1(x, pool_size=(1, 1), pool_type='avg')
         x = F.dropout(x, p=0.2, training=self.training, inplace=True)
-
-        return x, x1, x2
+        return x, out, x2
+        # return x, x1, x2
 
 ## Wavegram 
 class ConvPreWavBlock(nn.Module):
@@ -498,15 +504,80 @@ class PMA(nn.Module):
     def forward(self, X):
         return self.mab(self.S.repeat(X.size(0), 1, 1), X)
 
+
+class Channel_wise_attention(nn.Module):
+    def __init__(self, in_channel, out_channel,n_head=1):
+        super(Channel_wise_attention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.fc = nn.Sequential(
+                nn.Linear(in_channel*2, out_channel),
+                nn.ReLU(inplace=True),
+                nn.Linear(out_channel, in_channel),
+                nn.Sigmoid()
+                )
+        
+    def forward(self, x):
+        avg_feat = self.avg_pool(x)
+        max_feat = self.max_pool(y)
+        channel_feat = torch.cat((avg_feat, max_feat),dim=-1)
+
+        channel_feat_out = self.fc(channel_feat)
+        return channel_feat_out * x
+    
+class Conv_DW(nn.Module):
+    def __init__(self, in_channel, out_channel, stride=1):
+        super(Conv_DW, self).__init__()
+        self.conv = nn.Sequential(
+                    nn.Conv2d(in_channel, in_channel, 3, stride, 1, groups=in_channel, bias=False),
+                    nn.BatchNorm2d(in_channel),
+                    nn.ReLU(inplace=True),
+
+                    nn.Conv2d(in_channel, out_channel, 1, 1, 0, bias=False),
+                    nn.BatchNorm2d(out_channel),
+                    nn.ReLU(inplace=True),)
+
+    def forward(self, x):
+        return self.conv(x)
+
+class spatial_wise_attention(nn.Module):
+    def __init__(self, in_channel, out_channel, kernel_size, stride, padding):
+        super(spatial_wise_attention, self).__init__()
+        
+    def forward(self, x):
+        return x
+    
+class Conv_reduction(nn.Module):
+    def __init__(self, in_channel, hid_channel, out_channel, stride=2) -> None:
+        super(Conv_reduction, self).__init__()
+        self.conv = nn.Sequential(
+                    nn.Conv2d(in_channel, hid_channel, 1, 1, 0, bias=False),
+                    nn.BatchNorm2d(hid_channel),
+                    nn.ReLU(inplace=False),
+
+                    nn.Conv2d(hid_channel, hid_channel, 3, stride, 1, bias=False),
+                    nn.BatchNorm2d(hid_channel),
+                    nn.ReLU(inplace=False),
+
+                    nn.Conv2d(hid_channel, out_channel, 1, 1, 0, bias=False),
+                    nn.BatchNorm2d(out_channel),
+                    nn.ReLU(inplace=False),)
+    def forward(self,x):
+        return self.conv(x)
+    
 class Tag(nn.Module):
     def __init__(self, class_num, model_type, pretrain_model_path=None, freeze_cnn=False, GMAP=False, specMix=False):
         super(Tag, self).__init__()
         if model_type == 'Cnn10':
             self.feature = Cnn10()
             channel = 512
+            channel_f1 = 128
+            channel_f2 = 256
         elif model_type == 'resnet38':
             self.feature = ResNet38()
             channel = 2048
+            channel_f1 = 512 
+            channel_f2 = 256
         elif model_type == 'wavegram':
             self.feature = Wavegram_Logmel_Cnn14()
             channel = 2048
@@ -541,19 +612,39 @@ class Tag(nn.Module):
             self.fc_prob_att_f2 = nn.Linear(512, 512)
             self.fc1_f2 = nn.Linear(512,channel,bias=True)
 
-            self.fc = nn.Linear(channel*3,class_num,bias=True)
+            # self.fc = nn.Linear(channel*3,class_num,bias=True)
+            self.fc = nn.Linear(channel*3,300,bias=True)
         else:
-            self.fc1 = nn.Linear(channel, channel, bias=True)
-            self.fc1_f1 = nn.Linear(128, channel, bias=True)
-            self.fc1_f2 = nn.Linear(256, channel, bias=True)
-            self.fc = nn.Linear(channel*3,class_num,bias=True)
+            # self.fc1 = nn.Linear(channel, channel//2, bias=True)
+            # self.fc1_f1 = nn.Linear(128, channel//16, bias=True)
+            # self.fc1_f2 = nn.Linear(256, channel//8, bias=True)
+            # self.fc = nn.Linear(channel//2+channel//16+channel//8,class_num,bias=True)
+            # pdb.set_trace()
+            self.fc1 = nn.Linear(channel, channel//2, bias=True) ### 2048
+            self.fc1_f1 = nn.Linear(channel_f1, channel//2, bias=True)
+            self.fc1_f2 = nn.Linear(channel_f2, channel//2, bias=True)
+            self.fc = nn.Linear(channel//2*3,class_num,bias=True)
+
+            # self.fc1 = nn.Linear(channel, channel, bias=True) ### 2048
+            # self.fc1_f1 = nn.Linear(512, channel, bias=True)
+            # self.fc1_f2 = nn.Linear(256, channel, bias=True)
+            # self.fc = nn.Linear(channel*3,class_num,bias=True)
 
         self.GMAP = GMAP
         self.init_weights()
         self.specMix = specMix
         if specMix:
             self.spec_augmenter = SpecMixAugmentation(time_mix_width=64, time_stripes_num=3, freq_mix_width=5, freq_stripes_num=2)
-
+        
+        # self.conv_reduction = Conv_reduction(channel, channel//4, channel)
+        # self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
+        
+        
+        # weights = pickle.load(open('audio_tag/glove_weights.p','rb'))
+        # # pdb.set_trace()
+        # self.fc_weights = nn.Linear(300,300)
+        # weights = weights / weights.norm(dim=-1, keepdim=True)
+        # self.fc_weights.weight.data = weights
     def init_weights(self):
         init_layer(self.fc1)
         init_layer(self.fc)
@@ -564,9 +655,12 @@ class Tag(nn.Module):
             init_layer(self.fc_prob_att_f2)
 
     def freeze_cnn(self):
-        for p in self.feature.parameters():
-            p.requires_grad = False
-            
+        # for p in self.feature.parameters():
+        #     p.requires_grad = False
+        for n, p in self.feature.named_parameters():
+            if 'conv_block1' in n:
+                # pdb.set_trace()
+                p.requires_grad = False
     def forward(self,input):
         '''
         :param input: (batch_size,time_steps, mel_bins)
@@ -575,13 +669,13 @@ class Tag(nn.Module):
         if self.specMix and self.training:
             input = self.spec_augmenter(input[:,None,:,:])
             input = input[:,0]
-
+        # pdb.set_trace()
         feature, f1, f2 = self.feature(input)     #(batch_size, 512/2048, T/16, mel_bins/16)
         x = torch.mean(feature,dim=3)     #(batch_size, 512/2048, T/16) resnet 2048
         f1 = torch.mean(f1,dim=3)
         f2 = torch.mean(f2, dim=3)
         out1,out2,out3 = x,f1,f2
-
+        # pdb.set_trace()
         if self.GMAP:
             x = x.transpose(1, 2)
             x, A = self.pma(x)
@@ -602,15 +696,57 @@ class Tag(nn.Module):
             (b1, _) = torch.max(f2, dim=2)
             b2 = torch.mean(f2, dim=2)
             f2 = b1 + b2
-
+        ## original 
         x = F.dropout(x, p=0.2, training=self.training)
         x = F.relu_(self.fc1(x))
         f1 = F.dropout(f1, p=0.2, training=self.training)
         f1 = F.relu_(self.fc1_f1(f1))
         f2 = F.dropout(f2, p=0.2, training=self.training)
         f2 = F.relu_(self.fc1_f2(f2))
+        
         x = torch.cat((x, f1, f2), dim=1)
-        output = torch.sigmoid(self.fc(x))
+
+        # output = torch.sigmoid(self.fc(x))
+        output = self.fc(x)
         return output,out1,out2,out3
+    
+        # new 
+        # pdb.set_trace()
+        # global_pool = F.adaptive_avg_pool2d(feature,1).squeeze(-1).squeeze(-1)
+        # feature =  F.relu(self.conv_reduction(feature))
+        # reduction_pool = F.adaptive_avg_pool2d(feature,1).squeeze(-1).squeeze(-1)
+        # embs = torch.cat((global_pool, reduction_pool),dim=-1)
+        # embs = F.dropout(embs, p=0.2, training=self.training)
+        # output = torch.sigmoid(self.fc(embs))
+        # return output,None, None, None
+
+        #### glove
+        # pdb.set_trace()
+        # logit_scale = self.logit_scale.exp()
+        # x = self.fc(x)
+        # x = x / x.norm(dim=-1, keepdim=True)
+        # output = logit_scale * self.fc_weights(x)
+        # output = torch.sigmoid(output)
+        # return output,out1,out2,out3
 if __name__ == '__main__':
     encoder = Tag(300,'wavegram',"pretrainmodel/Wavegram_Logmel_Cnn14_mAP=0.439.pth",True)
+
+# class AttentionLayer(nn.Module):
+#     def __init__(self, channel, reduction=64, multiply=True):
+#         super(AttentionLayer, self).__init__()
+#         self.avg_pool = nn.AdaptiveAvgPool2d(1)
+#         self.fc = nn.Sequential(
+#                 nn.Linear(channel, channel // reduction),
+#                 nn.ReLU(inplace=True),
+#                 nn.Linear(channel // reduction, channel),
+#                 nn.Sigmoid()
+#                 )
+#         self.multiply = multiply
+#     def forward(self, x):
+#         b, c, _, _ = x.size()
+#         y = self.avg_pool(x).view(b, c)
+#         y = self.fc(y).view(b, c, 1, 1)
+#         if self.multiply == True:
+#             return x * y
+#         else:
+#             return y

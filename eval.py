@@ -22,12 +22,13 @@ import argparse
 #           f'--batch_size {bs} --mode {mode} --eval_dir {eval_dir}'
 #            )
 
-training_epochs = 10
-name = 'eval_test_1'
+training_epochs = 100
+name = 'test'
 # name = "eval_aoa_normal"
 bs = 32
 mode = "eval"
-eval_dir = "seed1111_rl/"
+# mode = "test"
+eval_dir = "seed1234_nopre_notag_truth/"
 os.system(f'python train.py '
           f' --training_epochs {training_epochs} '
           f'--name {name} '
