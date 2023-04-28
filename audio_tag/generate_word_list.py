@@ -6,13 +6,24 @@ from nltk.stem import WordNetLemmatizer
 
 from collections import Counter
 from ast import literal_eval
+import pdb
+# stop_words = ['time','times','object', 'make', 'play', 'distance', 'go', 'something', 'turn', 'get', 'come', 'follow', 'use',
+#  'piece', 'have','approach', 'rate', 'take', 'begin', 'end', 'forth', 'slow', 'continue', 'lot', 'work', 'place',
+#  'create', 'night', 'set', 'increase', 'page', 'others', 'put', 'item', 'way', 'variety', 'passing', 'do', 'repeat',
+#  'occur', 'leave', 'try', 'speaks', 'side', 'past', 'accelerate', 'overhead', 'path', 'thing', 'become',
+#  'kind', 'pattern', 'day', 'cause', 'frequency', 'couple', 'second', 'closing', 'note', 'interval',
+#  'vary', 'proximity', 'number', 'cover', 'system', 'effect','start','go','someone',
+#  'back','become','come','do',"amount",'has','other','top','background','person','people','group','made','foreground','somebody']
+
+
 stop_words = ['time','times','object', 'make', 'play', 'distance', 'go', 'something', 'turn', 'get', 'come', 'follow', 'use',
  'piece', 'have','approach', 'rate', 'take', 'begin', 'end', 'forth', 'slow', 'continue', 'lot', 'work', 'place',
  'create', 'night', 'set', 'increase', 'page', 'others', 'put', 'item', 'way', 'variety', 'passing', 'do', 'repeat',
  'occur', 'leave', 'try', 'speaks', 'side', 'past', 'accelerate', 'overhead', 'path', 'thing', 'signal', 'become',
  'kind', 'pattern', 'day', 'cause', 'frequency', 'couple', 'second', 'closing', 'note', 'interval',
  'vary', 'proximity', 'number', 'cover', 'system', 'effect','start','go','someone',
- 'back','become','change','come','do',"amount",'has','other','top','background','person','people']
+ 'back','become','change','come','do',"amount",'has','other','top', 'background', 'group','made','foreground','somebody']
+
 
 def dict_add(word_freq_dict, w, f):
     if w in word_freq_dict.keys():
@@ -30,7 +41,8 @@ df_val = pd.read_csv(val_csv)
 data1 = df_train.values
 data2 = df_test.values
 data3 = df_val.values
-alldata = np.concatenate((data1,data2,data3))
+# alldata = np.concatenate((data1,data2,data3))
+alldata = data1
 lemmatizer = WordNetLemmatizer()
 all_keywords = Counter()
 count = 0
@@ -44,6 +56,7 @@ for data in alldata:
         text_list = nltk.pos_tag(text)
         # print(text_list)
         keywords = []
+        
         for word, tag in text_list:
             word = word.lower()
             if tag.startswith("VB"):
@@ -57,8 +70,10 @@ for data in alldata:
                 continue
         tmp = Counter(keywords)
         all_keywords += tmp
-    print(count)
+    # print(count)
     count += 1
+    if count % 1000 == 0:
+        print(count)
 
 word_freq_dict = {}
 selected_words = all_keywords.most_common()
@@ -83,21 +98,25 @@ for w, f in selected_words:
         word_freq_dict = dict_add(word_freq_dict, w[:-3]+'e', f)
     else:
         word_freq_dict = dict_add(word_freq_dict, w, f)
+
 word_freq = sorted([(w, f) for w, f in word_freq_dict.items()], key=lambda x: x[1], reverse=True)
-word_freq = [(w, f) for w, f in word_freq if len(w) > 2]
+word_freq = [(w, f) for w, f in word_freq if len(w) > 2 and f>5]
 word_list_f = []
 for w, f in word_freq:
     if w not in stop_words:
         word_list_f.append((w,f))
     else:
         print(w)
-
-word_list_final = [w for w, f in word_list_f][:300]
+# pdb.set_trace()
+word_list_final = [w for w, f in word_list_f][:500]
 
 # TaggingToembs
 Tag2emb = []
 for w in word_list_final:
     Tag2emb.append(word_list.index(w))
-print(word_list_final)
-pickle.dump(word_list_final, open('word_list_pretrain_rules.p', 'wb'))
-pickle.dump(Tag2emb, open('TaggingToEmbs.p', 'wb'))
+# pdb.set_trace()
+# print(word_list_final, len(word_list_final),word_freq)
+# pickle.dump(word_list_final, open('word_list_pretrain_rules_train_new.p', 'wb'))
+# pickle.dump(Tag2emb, open('TaggingToEmbs_train_new.p', 'wb'))
+pickle.dump(word_list_final, open('word_list_500_train.p', 'wb'))
+pickle.dump(Tag2emb, open('TaggingToEmbs_500_train.p', 'wb'))

@@ -1,16 +1,21 @@
 import csv
+from fileinput import filename
 import pickle
 from captions_functions import clean_sentence,get_words_counter,get_sentence_words
 import copy
-import nltk
-from nltk.stem import WordNetLemmatizer
+import pdb
+# import nltk
+# from nltk.stem import WordNetLemmatizer
 
-lemmatizer = WordNetLemmatizer()
+# lemmatizer = WordNetLemmatizer()
 # with open('word_list_pretrain_rules.p', 'rb') as f:
 #     testtag = pickle.load(f)
 # _test contains background people person 
-with open('word_list_pretrain_rules.p', 'rb') as f:
+# with open('word_list_pretrain_rules_train.p', 'rb') as f:
+# with open('word_list_allwords.p', 'rb') as f:
+with open('word_list_500_train.p', 'rb') as f:
     testtag = pickle.load(f)
+
 def c_wordList(x):
     WordList = copy.copy(x)
     for w in x:
@@ -73,7 +78,8 @@ def gen_tag(split):
             if attribute in audioList:
                 curAttributes.append(attribute)
         allAttributes[file_name] = curAttributes
-
+        # if file_name == 'Wind-Blowing.wav':
+            # pdb.set_trace()
     allAttributesNum = {}
     for file_name, audioList in zip(file_names, allWordList):
         curAttributes = [0 for s in range(len(testtag))]
@@ -82,16 +88,18 @@ def gen_tag(split):
             if attribute in audioList:
                 curAttributes[i] = 1
                 count+=1
-        
-        if count <= 2 :
+        # if file_name == 'Wind-Blowing.wav':
+        #     pdb.set_trace()
+        if count <= 0 :
             all_count+=1
             print("there is no word in ",file_name)
+        file_name = (split, file_name) # add
         allAttributesNum[file_name] = curAttributes
 
-    with open('audioTagNum_{}_fin_nv.pickle'.format(split), 'wb') as f:
+    with open('audioTagNum_{}_fin_nv_train_500.pickle'.format(split), 'wb') as f:
         pickle.dump(allAttributesNum, f)
 
-    with open('audioTagName_{}_fin_nv.pickle'.format(split), 'wb') as f:
+    with open('audioTagName_{}_fin_nv_train_500.pickle'.format(split), 'wb') as f:
         pickle.dump(allAttributes, f)
     print(all_count)
     # with open('Tag_fin.pickle','wb') as f:
